@@ -1457,14 +1457,16 @@ def seed_windows(
     score_max: float,
     kmax: int,
     kmin: int,
+    rank_by_anchors: bool = False,
+    anchor_thr: float = -25.0,
     prefilter_len: int = 0,
     prefilter_score_max: Optional[float] = None,
     prefilter_kmax: int = 0,
     prefilter_kmin: int = 0,
     unknown_policy: str = "error",
     context_bonus: bool = False,
-) -> List[Tuple[float, int, int]]:
-    """Return seed windows (score, i, j) filtered by score_max and capped by kmax.
+) -> List[Tuple[float, int, int, int]]:
+    """Return seed windows (score, i, j, anchors) filtered by score_max and capped by kmax.
 
     If fewer than kmin seeds pass the score_max filter, the best kmin are kept.
     """
@@ -1476,28 +1478,31 @@ def seed_windows(
         return []
 
     # Use a faster numpy path when available (especially for large FASTA scans).
-    hits_np = _seed_windows_numpy(
-        seq1,
-        seq2,
-        mj,
-        window=window,
-        score_max=score_max,
-        kmax=kmax,
-        kmin=kmin,
-        prefilter_len=prefilter_len,
-        prefilter_score_max=prefilter_score_max,
-        prefilter_kmax=prefilter_kmax,
-        prefilter_kmin=prefilter_kmin,
-        unknown_policy=unknown_policy,
-        context_bonus=context_bonus,
-    )
-    if hits_np is not None:
-        return hits_np
+    # Anchor-first ranking needs per-position counts, so skip numpy in that case.
+    if not rank_by_anchors:
+        hits_np = _seed_windows_numpy(
+            seq1,
+            seq2,
+            mj,
+            window=window,
+            score_max=score_max,
+            kmax=kmax,
+            kmin=kmin,
+            prefilter_len=prefilter_len,
+            prefilter_score_max=prefilter_score_max,
+            prefilter_kmax=prefilter_kmax,
+            prefilter_kmin=prefilter_kmin,
+            unknown_policy=unknown_policy,
+            context_bonus=context_bonus,
+        )
+        if hits_np is not None:
+            return [(s, i, j, 0) for (s, i, j) in hits_np]
 
     mj_score = get_mj_scorer(mj)
 
-    def score_window(i: int, j: int, win: int) -> Optional[float]:
+    def score_window(i: int, j: int, win: int) -> Optional[Tuple[float, int]]:
         s = 0.0
+        anchors = 0
         for k in range(win):
             try:
                 v = mj_score(seq1[i + k], seq2[j + k])
@@ -1508,6 +1513,8 @@ def seed_windows(
                     return None
                 v = 0.0
             s += v
+            if v <= anchor_thr:
+                anchors += 1
         if context_bonus:
             s += sum(
                 context_bonus_aligned(
@@ -1517,9 +1524,9 @@ def seed_windows(
                     unknown_policy=unknown_policy,
                 )
             )
-        return s
+        return s, anchors
 
-    hits: List[Tuple[float, int, int]] = []
+    hits: List[Tuple[float, int, int, int]] = []
     use_prefilter = (
         prefilter_len
         and prefilter_len > 0
@@ -1533,9 +1540,10 @@ def seed_windows(
         pf_hits: List[Tuple[float, int, int]] = []
         for i in range(0, n1 - prefilter_len + 1):
             for j in range(0, n2 - prefilter_len + 1):
-                s = score_window(i, j, prefilter_len)
-                if s is None:
+                r = score_window(i, j, prefilter_len)
+                if r is None:
                     continue
+                s, _a = r
                 pf_hits.append((s, i, j))
 
         if not pf_hits:
@@ -1554,23 +1562,29 @@ def seed_windows(
         for i, j in candidates:
             if i + window > n1 or j + window > n2:
                 continue
-            s = score_window(i, j, window)
-            if s is None:
+            r = score_window(i, j, window)
+            if r is None:
                 continue
-            hits.append((s, i, j))
+            s, anchors = r
+            hits.append((s, i, j, anchors))
     else:
         for i in range(0, n1 - window + 1):
             for j in range(0, n2 - window + 1):
-                s = score_window(i, j, window)
-                if s is None:
+                r = score_window(i, j, window)
+                if r is None:
                     continue
-                hits.append((s, i, j))
+                s, anchors = r
+                hits.append((s, i, j, anchors))
 
     if not hits:
         return []
 
-    hits.sort(key=lambda x: x[0])  # most negative first
-    filtered = [h for h in hits if h[0] <= score_max]
+    if rank_by_anchors:
+        hits.sort(key=lambda x: (-x[3], x[0]))  # most anchors, then most negative
+        filtered = [h for h in hits if h[0] <= score_max]
+    else:
+        hits.sort(key=lambda x: x[0])  # most negative first
+        filtered = [h for h in hits if h[0] <= score_max]
 
     if len(filtered) < kmin:
         filtered = hits[: min(kmin, len(hits))]
@@ -1579,6 +1593,14 @@ def seed_windows(
         filtered = filtered[:kmax]
 
     return filtered
+
+
+def _seed_unpack(seed):
+    score = seed[0]
+    i = seed[1]
+    j = seed[2]
+    anchors = seed[3] if len(seed) > 3 else None
+    return score, i, j, anchors
 
 
 def _seed_windows_numpy(
@@ -3671,6 +3693,12 @@ def main(argv=None) -> int:
         help="Stage-1 seed window length (default: 12)",
     )
     p.add_argument(
+        "--seed-rank",
+        choices=["score", "anchors"],
+        default="score",
+        help="Stage-1 ranking: 'score' = most negative sum, 'anchors' = most anchors then best score",
+    )
+    p.add_argument(
         "--seed-score-max",
         type=float,
         default=-220.0,
@@ -4481,6 +4509,8 @@ def main(argv=None) -> int:
                     score_max=args.seed_score_max,
                     kmax=args.seed_kmax,
                     kmin=args.seed_kmin,
+                    rank_by_anchors=(args.seed_rank == "anchors"),
+                    anchor_thr=args.thr,
                     prefilter_len=args.seed_prefilter_len,
                     prefilter_score_max=args.seed_prefilter_score_max,
                     prefilter_kmax=args.seed_prefilter_kmax,
@@ -4488,11 +4518,14 @@ def main(argv=None) -> int:
                     unknown_policy=args.unknown,
                     context_bonus=args.context_bonus,
                 )
-                for score, i, j in seeds:
-                    global_seeds.append((score, i, j, name2, seq2))
+                for score, i, j, anchors in seeds:
+                    global_seeds.append((score, i, j, name2, seq2, anchors))
 
             if global_seeds:
-                global_seeds.sort(key=lambda x: x[0])
+                if args.seed_rank == "anchors":
+                    global_seeds.sort(key=lambda x: (-x[5], x[0]))
+                else:
+                    global_seeds.sort(key=lambda x: x[0])
                 offset = max(0, args.seed_topk_global_offset)
                 if offset >= len(global_seeds):
                     print(
@@ -4507,11 +4540,11 @@ def main(argv=None) -> int:
                     print(
                         f"Stage-1 global seeds {start_idx}-{end_idx} across {len(targets)} targets"
                     )
-                    for idx, (score, i, j, name2, seq2) in enumerate(topk, start=1):
+                    for idx, (score, i, j, name2, seq2, anchors) in enumerate(topk, start=1):
                         s1_seed = s1[i : i + args.seed_len]
                         s2_seed = seq2[j : j + args.seed_len]
                         print(
-                            f"  [{idx}] score={fmt_float(score, 2)}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  {name2}  {s1_seed} ↔ {s2_seed}"
+                            f"  [{idx}] score={fmt_float(score, 2)}  anchors={anchors}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  {name2}  {s1_seed} ↔ {s2_seed}"
                         )
                     if not args.seed_select:
                         listed_only = True
@@ -4522,7 +4555,7 @@ def main(argv=None) -> int:
                                 file=sys.stderr,
                             )
                             return 2
-                        score, i, j, name2, seq2 = topk[args.seed_select - 1]
+                        score, i, j, name2, seq2, _anchors = topk[args.seed_select - 1]
                         preselected_seed = (score, i, j)
                         preselected_target = (name2, seq2)
             else:
@@ -4546,6 +4579,8 @@ def main(argv=None) -> int:
                     score_max=args.seed_score_max,
                     kmax=args.seed_kmax,
                     kmin=args.seed_kmin,
+                    rank_by_anchors=(args.seed_rank == "anchors"),
+                    anchor_thr=args.thr,
                     prefilter_len=args.seed_prefilter_len,
                     prefilter_score_max=args.seed_prefilter_score_max,
                     prefilter_kmax=args.seed_prefilter_kmax,
@@ -4559,11 +4594,12 @@ def main(argv=None) -> int:
                 if args.seed_topk and args.seed_topk > 0:
                     topk = seeds[: min(args.seed_topk, len(seeds))]
                     print(f"Stage-1 top {len(topk)} seeds for {name2}")
-                    for idx, (score, i, j) in enumerate(topk, start=1):
+                    for idx, seed in enumerate(topk, start=1):
+                        score, i, j, anchors = _seed_unpack(seed)
                         s1_seed = s1[i : i + args.seed_len]
                         s2_seed = seq2[j : j + args.seed_len]
                         print(
-                            f"  [{idx}] score={fmt_float(score, 2)}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  {s1_seed} ↔ {s2_seed}"
+                            f"  [{idx}] score={fmt_float(score, 2)}  anchors={anchors}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  {s1_seed} ↔ {s2_seed}"
                         )
                     if not args.seed_select:
                         listed_only = True
@@ -4582,7 +4618,7 @@ def main(argv=None) -> int:
                         return 2
                     seeds = [topk[args.seed_select - 1]]
 
-            best_seed_score, best_seed_i, best_seed_j = seeds[0]
+            best_seed_score, best_seed_i, best_seed_j, best_seed_anchors = _seed_unpack(seeds[0])
             seed_pct = None
             if args.seed_null and args.seed_null > 0:
                 null_scores = seed_null_best_scores(
@@ -4619,13 +4655,15 @@ def main(argv=None) -> int:
                     "best_j": best_seed_j,
                     "best_s1": s1[best_seed_i : best_seed_i + args.seed_len],
                     "best_s2": seq2[best_seed_j : best_seed_j + args.seed_len],
+                    "best_anchors": best_seed_anchors,
                     "seed_pct": seed_pct,
                     "seed_null_stats": seed_null_stats,
                 }
             )
 
             seeds_to_extend = seeds if args.stage2_all_seeds else seeds[:1]
-            for score, i, j in seeds_to_extend:
+            for seed in seeds_to_extend:
+                score, i, j, _anchors = _seed_unpack(seed)
                 st2_score, aln1, aln2, start, anchor = stage2_best_from_seed(
                     s1,
                     seq2,
@@ -4683,9 +4721,10 @@ def main(argv=None) -> int:
         for s in stage1_summary:
             pct_str = fmt_pct(
                 s["seed_pct"], 4) if s["seed_pct"] is not None else "n/a"
+            anchors_str = f"  anchors={s['best_anchors']}" if s.get("best_anchors") is not None else ""
             print(
                 f"  {s['name2']}  seeds={s['seed_count']}  best={fmt_float(s['best_score'], 2)}"
-                f"  @ ({s['best_i']+1},{s['best_j']+1})  null_pct={pct_str}"
+                f"{anchors_str}  @ ({s['best_i']+1},{s['best_j']+1})  null_pct={pct_str}"
             )
             print(f"    seed1: {s['best_s1']}")
             print(f"    seed2: {s['best_s2']}")
