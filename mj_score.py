@@ -2419,6 +2419,18 @@ def load_mj_csv(path: str) -> Dict[Tuple[str, str], float]:
     return mj
 
 
+def maybe_invert_mj(mj: Dict[Tuple[str, str], float]) -> Tuple[Dict[Tuple[str, str], float], bool, Tuple[float, float]]:
+    """If matrix is non-negative, invert so 'lower is better' logic still works."""
+    vals = list(mj.values())
+    if not vals:
+        return mj, False, (0.0, 0.0)
+    vmin = min(vals)
+    vmax = max(vals)
+    if vmin >= 0.0:
+        return {k: -v for k, v in mj.items()}, True, (vmin, vmax)
+    return mj, False, (vmin, vmax)
+
+
 # ---------- Core scoring ----------
 
 def score_aligned(
@@ -3861,6 +3873,14 @@ def main(argv=None) -> int:
 
     # Load MJ
     mj = load_mj_csv(args.mj)
+    mj, mj_inverted, (mj_min, mj_max) = maybe_invert_mj(mj)
+    if mj_inverted:
+        print(
+            f"[info] MJ matrix has no negative values (min={mj_min:g}, max={mj_max:g}); "
+            "auto-inverting values so lower scores are still more favorable. "
+            "Adjust thresholds accordingly.",
+            file=sys.stderr,
+        )
 
     if args.scanprosite_search_complement:
         if not args.fasta2:
