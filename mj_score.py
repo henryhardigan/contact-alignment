@@ -4873,10 +4873,15 @@ def main(argv=None) -> int:
             for i, v in enumerate(_st2_per, start=1):
                 if v is None:
                     continue
+                if float(v) > args.thr:
+                    continue
                 a = h["aln1"][i - 1]
                 b = h["aln2"][i - 1]
                 contrib.append(f"{i}:{a}-{b}:{fmt_float(float(v), 2)}")
-            print("  MJ per-pos:", " ".join(contrib))
+            if contrib:
+                print("  MJ per-pos:", " ".join(contrib))
+            else:
+                print("  MJ per-pos: (none)")
             if args.hmm_interface:
                 path = hmm_interface_path(
                     _st2_per, tc=args.hmm_tc, tp=args.hmm_tp)
