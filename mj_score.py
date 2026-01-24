@@ -3909,9 +3909,9 @@ def main(argv=None) -> int:
         global APPLY_MJ_OVERRIDES
         APPLY_MJ_OVERRIDES = False
         if args.thr == -25.0:
-            args.thr = -0.5
+            args.thr = -0.75
             print(
-                "[info] Auto-adjusted anchor threshold to -0.5 for nonnegative matrix.",
+                "[info] Auto-adjusted anchor threshold to -0.75 for nonnegative matrix.",
                 file=sys.stderr,
             )
         if args.seed_score_max == -220.0:
