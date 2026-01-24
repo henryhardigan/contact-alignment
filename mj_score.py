@@ -17,6 +17,7 @@ POS_CHARGES = {"K", "R"}
 NEG_CHARGES = {"D", "E"}
 HYDROPHOBES = {"A", "I", "L", "M", "V", "F", "W", "Y"}
 HYDROPHOBE_OFFSET_WEIGHT = 0.6
+APPLY_MJ_OVERRIDES = True
 
 CLUSTAL_STRONG_GROUPS = [
     set("STA"),
@@ -46,6 +47,8 @@ CLUSTAL_WEAK_GROUPS = [
 
 def apply_mj_overrides(a: str, b: str, val: Optional[float]) -> Optional[float]:
     """Apply custom MJ overrides (e.g., aromatics vs small residues)."""
+    if not APPLY_MJ_OVERRIDES:
+        return val
     if a in AROMATICS and b in SMALL_NEUTRAL:
         return -8.0
     if b in AROMATICS and a in SMALL_NEUTRAL:
@@ -3875,6 +3878,8 @@ def main(argv=None) -> int:
     mj = load_mj_csv(args.mj)
     mj, mj_inverted, (mj_min, mj_max) = maybe_invert_mj(mj)
     if mj_inverted:
+        global APPLY_MJ_OVERRIDES
+        APPLY_MJ_OVERRIDES = False
         if args.thr == -25.0:
             args.thr = -0.5
             print(
@@ -3899,6 +3904,10 @@ def main(argv=None) -> int:
             f"[info] MJ matrix has no negative values (min={mj_min:g}, max={mj_max:g}); "
             "auto-inverting values so lower scores are still more favorable. "
             "Adjust thresholds accordingly.",
+            file=sys.stderr,
+        )
+        print(
+            "[info] MJ overrides disabled for nonnegative matrix.",
             file=sys.stderr,
         )
 
