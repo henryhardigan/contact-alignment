@@ -3881,6 +3881,20 @@ def main(argv=None) -> int:
                 "[info] Auto-adjusted anchor threshold to -0.5 for nonnegative matrix.",
                 file=sys.stderr,
             )
+        if args.seed_score_max == -220.0:
+            args.seed_score_max = -0.5 * float(args.seed_len)
+            print(
+                f"[info] Auto-adjusted seed score max to {args.seed_score_max:g} "
+                f"based on seed length {args.seed_len}.",
+                file=sys.stderr,
+            )
+        if args.seed_prefilter_len and args.seed_prefilter_score_max == -120.0:
+            args.seed_prefilter_score_max = -0.5 * float(args.seed_prefilter_len)
+            print(
+                f"[info] Auto-adjusted prefilter score max to {args.seed_prefilter_score_max:g} "
+                f"based on prefilter length {args.seed_prefilter_len}.",
+                file=sys.stderr,
+            )
         print(
             f"[info] MJ matrix has no negative values (min={mj_min:g}, max={mj_max:g}); "
             "auto-inverting values so lower scores are still more favorable. "
