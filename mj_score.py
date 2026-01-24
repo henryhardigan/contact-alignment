@@ -3875,6 +3875,12 @@ def main(argv=None) -> int:
     mj = load_mj_csv(args.mj)
     mj, mj_inverted, (mj_min, mj_max) = maybe_invert_mj(mj)
     if mj_inverted:
+        if args.thr == -25.0:
+            args.thr = -0.5
+            print(
+                "[info] Auto-adjusted anchor threshold to -0.5 for nonnegative matrix.",
+                file=sys.stderr,
+            )
         print(
             f"[info] MJ matrix has no negative values (min={mj_min:g}, max={mj_max:g}); "
             "auto-inverting values so lower scores are still more favorable. "
