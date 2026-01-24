@@ -4879,7 +4879,7 @@ def main(argv=None) -> int:
                 b = h["aln2"][i - 1]
                 contrib.append(f"{i}:{a}-{b}:{fmt_float(float(v), 2)}")
             if contrib:
-                print("  MJ per-pos:", " ".join(contrib))
+                print(f"  MJ per-pos (anchors={len(contrib)}):", " ".join(contrib))
             else:
                 print("  MJ per-pos: (none)")
             if args.hmm_interface:
