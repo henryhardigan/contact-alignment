@@ -4575,10 +4575,14 @@ def main(argv=None) -> int:
         print("Two-stage seed + extension")
         targets: List[Tuple[str, str]] = []
         if args.fasta2:
-            all_targets = [(n, s.upper()) for n, s in read_fasta_all(args.fasta2)]
-            if args.fasta_filter:
-                all_targets = [t for t in all_targets if args.fasta_filter in t[0]]
-            targets = all_targets
+            if args.fasta2_entry:
+                n2, s2 = read_fasta_entry(args.fasta2, args.fasta2_entry)
+                targets = [(n2, s2.upper())]
+            else:
+                all_targets = [(n, s.upper()) for n, s in read_fasta_all(args.fasta2)]
+                if args.fasta_filter:
+                    all_targets = [t for t in all_targets if args.fasta_filter in t[0]]
+                targets = all_targets
         else:
             targets = [(args.name2, s2)]
 
