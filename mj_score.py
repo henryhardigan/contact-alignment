@@ -2444,6 +2444,43 @@ def load_mj_csv(path: str) -> Dict[Tuple[str, str], float]:
     return mj
 
 
+def load_matrix_csv(path: str):
+    """Load either a pairwise (20x20) matrix or a 20xN position matrix.
+
+    Returns:
+      - ("pair", mj_dict, None) for AAxAA matrices
+      - ("pssm", pssm_dict, positions) for AAxN matrices
+    """
+    import csv
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        cols = [h.strip().upper() for h in header[1:] if h is not None]
+        rows = [row for row in reader if row and row[0].strip()]
+
+    # Detect AAxAA: header is 20 AAs
+    if len(cols) == 20 and all(c in AA20 for c in cols):
+        return "pair", load_mj_csv(path), None
+
+    # Otherwise treat as AAxN PSSM (positions in header or any labels)
+    positions = [h.strip() for h in header[1:]]
+    if not positions:
+        raise ValueError(f"Invalid matrix header in {path!r}")
+    pssm: Dict[str, List[float]] = {}
+    for row in rows:
+        aa = row[0].strip().upper()
+        if aa not in AA20:
+            continue
+        vals = [v.strip() for v in row[1:]]
+        if len(vals) != len(positions):
+            raise ValueError(f"Row length mismatch for {aa} in {path!r}")
+        pssm[aa] = [float(v) for v in vals]
+
+    if not pssm:
+        raise ValueError(f"No matrix values loaded from {path!r}")
+    return "pssm", pssm, positions
+
+
 def maybe_invert_mj(mj: Dict[Tuple[str, str], float]) -> Tuple[Dict[Tuple[str, str], float], bool, Tuple[float, float]]:
     """If matrix is non-negative, invert so 'lower is better' logic still works."""
     vals = list(mj.values())
@@ -3115,6 +3152,27 @@ def best_window_score(
     return best, best_start
 
 
+def pssm_scan(seq: str, pssm: Dict[str, List[float]], window: int, topk: int) -> List[Tuple[float, int, str]]:
+    """Scan a sequence with a position-specific matrix. Returns top hits by sum (higher is better)."""
+    s = seq.strip().upper()
+    if window <= 0 or len(s) < window:
+        return []
+    hits: List[Tuple[float, int, str]] = []
+    for i in range(0, len(s) - window + 1):
+        score = 0.0
+        ok = True
+        for k in range(window):
+            aa = s[i + k]
+            if aa not in pssm:
+                ok = False
+                break
+            score += pssm[aa][k]
+        if ok:
+            hits.append((score, i, s[i : i + window]))
+    hits.sort(key=lambda x: x[0], reverse=True)
+    return hits[:topk]
+
+
 def quantile(values: List[float], q: float) -> float:
     """Deterministic quantile using linear interpolation between order statistics."""
     if not values:
@@ -3599,6 +3657,12 @@ def main(argv=None) -> int:
         default=None,
         help="If set, compute scan-aware null for the best contiguous window of this length",
     )
+    p.add_argument(
+        "--pssm-topk",
+        type=int,
+        default=3,
+        help="PSSM mode: number of top hits to print per sequence (default: 3)",
+    )
     # Auto-align (ungapped): scan all window pairs of a fixed length and use the best-scoring pair as the effective alignment.
     p.add_argument(
         "--auto-align-len",
@@ -3902,8 +3966,41 @@ def main(argv=None) -> int:
     if args.seed is not None:
         random.seed(args.seed)
 
-    # Load MJ
-    mj = load_mj_csv(args.mj)
+    # Load matrix (pairwise or position-specific)
+    mode, matrix, positions = load_matrix_csv(args.mj)
+
+    if mode == "pssm":
+        # Position-specific scan mode (single sequence)
+        window = len(positions) if positions else 0
+        if window <= 0:
+            print("Invalid PSSM window size.", file=sys.stderr)
+            return 2
+        if args.fasta2 or args.seq2:
+            print("[info] PSSM mode: ignoring --seq2/--fasta2.", file=sys.stderr)
+
+        if args.fasta1:
+            if args.fasta1_entry:
+                entries = [read_fasta_entry(args.fasta1, args.fasta1_entry)]
+            else:
+                entries = list(read_fasta_all(args.fasta1))
+        elif args.seq1:
+            entries = [(args.name1, args.seq1)]
+        else:
+            print("PSSM mode requires --seq1 or --fasta1.", file=sys.stderr)
+            return 2
+
+        for name, seq in entries:
+            hits = pssm_scan(seq, matrix, window, args.pssm_topk)
+            print(f"PSSM scan: {name} (len={len(seq)}) window={window}")
+            if not hits:
+                print("  (no hits)")
+                continue
+            for idx, (score, start, win) in enumerate(hits, start=1):
+                print(f"  [{idx}] score={fmt_float(score, 2)}  pos={start+1}-{start+window}  {win}")
+        return 0
+
+    # Pairwise MJ mode
+    mj = matrix
     mj, mj_inverted, (mj_min, mj_max) = maybe_invert_mj(mj)
     if mj_inverted:
         global APPLY_MJ_OVERRIDES
