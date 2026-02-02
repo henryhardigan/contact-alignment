@@ -19,8 +19,12 @@ Finds the best ungapped window pair using MJ scoring.
 - `rng_seed`: Random seed for sampling
 - `unknown_policy`: How to handle unknown residues
 - `context_bonus`: Apply context bonuses
+- `orientation`: 'forward', 'reverse', or 'both' (seq2 orientation, default: 'both')
+- `return_orientation`: Append orientation label to the return tuple
 
-**Returns:** `(score, start_i, start_j, per_pos_scores)`
+**Returns:** `(score, start_i, start_j, per_pos_scores)` (optionally with `orientation`)
+
+Note: When `orientation="reverse"`, `start_j` is reported in original `seq2` coordinates.
 
 **Algorithm:**
 1. For each window position (i, j), sum MJ scores for all aligned positions
@@ -45,8 +49,12 @@ Finds best ungapped window using Clustal similarity scoring instead of MJ.
 - `require_positions2`: Position constraints as (offset, allowed_set) tuples
 - `rank_by`: 'score' or 'identity' for ranking
 - `filter_charge_runs`: Skip windows containing charge runs
+- `orientation`: 'forward', 'reverse', or 'both' (seq2 orientation, default: 'both')
+- `return_orientation`: Append orientation label to the return tuple
 
-**Returns:** `(score, start_i, start_j, identity_count)`
+**Returns:** `(score, start_i, start_j, identity_count)` (optionally with `orientation`)
+
+Note: When `orientation="reverse"`, `start_j` is reported in original `seq2` coordinates.
 
 This is useful for finding regions with sequence similarity that might also have complementarity.
 
@@ -54,7 +62,7 @@ This is useful for finding regions with sequence similarity that might also have
 
 Returns top-K best windows instead of just the single best.
 
-**Returns:** List of `(score, identity_count, start_i, start_j)` tuples, sorted by ranking criterion.
+**Returns:** List of `(score, identity_count, start_i, start_j)` tuples, sorted by ranking criterion. Use `include_orientation=True` to append orientation labels.
 
 ### `seed_windows(seq1, seq2, mj, *, window, score_max, kmax, kmin, ...)`
 
@@ -68,8 +76,12 @@ Generates a filtered list of seed windows for alignment.
 - `prefilter_len`: Shorter window for prefiltering (0 = disabled)
 - `prefilter_score_max`: Score threshold for prefiltering
 - `prefilter_kmax`, `prefilter_kmin`: Prefilter candidate limits
+- `orientation`: 'forward', 'reverse', or 'both' (seq2 orientation, default: 'both')
+- `include_orientation`: Append orientation labels to tuples
 
 **Returns:** List of `(score, start_i, start_j)` tuples sorted by score (most negative first)
+
+Note: When `orientation="reverse"`, `start_j` is reported in original `seq2` coordinates.
 
 **Algorithm:**
 1. Optionally prefilter with shorter windows for efficiency

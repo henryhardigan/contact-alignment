@@ -555,157 +555,138 @@ def best_ungapped_window_pair_clustal(
     require_positions2: Optional[List[Tuple[int, Set[str]]]] = None,
     rank_by: str = "score",
     filter_charge_runs: bool = False,
-) -> Tuple[Optional[float], Optional[int], Optional[int], Optional[int]]:
+    orientation: str = "both",
+    return_orientation: bool = False,
+) -> Tuple:
+    orientation = _normalize_orientation(orientation)
     if window <= 0:
-        return None, None, None
+        return None, None, None, None
     n1 = len(seq1)
     n2 = len(seq2)
     if n1 < window or n2 < window:
-        return None, None, None
+        return None, None, None, None
 
-    prefix = None
-    if kmer_len and kmer_len > 0 and kmer_len <= window:
-        seq1_kmers = set()
-        for i in range(0, n1 - kmer_len + 1):
-            kmer = seq1[i : i + kmer_len]
-            if any(c not in AA20 for c in kmer):
-                if unknown_policy == "error":
-                    raise ValueError("Unknown residue in Clustal k-mer scan")
-                continue
-            seq1_kmers.add(kmer)
-        if not seq1_kmers:
-            return None, None, None
-        hits = _kmer_hits(seq2, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
-        if not hits:
-            return None, None, None
-        prefix = [0]
-        for h in hits:
-            prefix.append(prefix[-1] + (1 if h else 0))
+    def rank_key(score: float, ident: int) -> Tuple:
+        if rank_by == "identity":
+            return (ident, score)
+        return (score,)
 
-    total_pairs = (n1 - window + 1) * (n2 - window + 1)
-    use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
-
-    best = float("-inf")
-    best_ident = None
-    best_i = None
-    best_j = None
-
-    if use_sampling:
-        rng = random.Random(rng_seed)
-        for _ in range(max_evals):
-            i = rng.randrange(0, n1 - window + 1)
-            j = rng.randrange(0, n2 - window + 1)
-            if require_positions2:
-                if any(seq2[j + off] not in allowed for off, allowed in require_positions2):
+    def run(seq2_local: str) -> Tuple[Optional[float], Optional[int], Optional[int], Optional[int]]:
+        prefix = None
+        if kmer_len and kmer_len > 0 and kmer_len <= window:
+            seq1_kmers = set()
+            for i in range(0, n1 - kmer_len + 1):
+                kmer = seq1[i : i + kmer_len]
+                if any(c not in AA20 for c in kmer):
+                    if unknown_policy == "error":
+                        raise ValueError("Unknown residue in Clustal k-mer scan")
                     continue
+                seq1_kmers.add(kmer)
+            if not seq1_kmers:
+                return None, None, None, None
+            hits = _kmer_hits(seq2_local, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
+            if not hits:
+                return None, None, None, None
+            prefix = [0]
+            for h in hits:
+                prefix.append(prefix[-1] + (1 if h else 0))
+
+        total_pairs = (n1 - window + 1) * (len(seq2_local) - window + 1)
+        use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
+
+        best = float("-inf")
+        best_ident = None
+        best_i = None
+        best_j = None
+
+        def evaluate_window(i: int, j: int) -> Optional[Tuple[float, int]]:
+            if require_positions2:
+                if any(seq2_local[j + off] not in allowed for off, allowed in require_positions2):
+                    return None
             if prefix is not None:
                 end = j + (window - kmer_len + 1)
                 if end > len(prefix) - 1:
-                    continue
+                    return None
                 if prefix[end] - prefix[j] < kmer_min:
-                    continue
+                    return None
             if filter_charge_runs:
                 win1 = seq1[i : i + window]
-                win2 = seq2[j : j + window]
+                win2 = seq2_local[j : j + window]
                 if has_charge_run(win1) or has_charge_run(win2):
-                    continue
+                    return None
             s = 0.0
-            invalid = False
             strong = 0
             ident = 0
             for k in range(window):
                 a = seq1[i + k]
-                b = seq2[j + k]
+                b = seq2_local[j + k]
                 v = clustal_pair_score(a, b)
                 if v is None:
                     if unknown_policy == "error":
                         raise ValueError("Unknown residue in Clustal scan")
                     if unknown_policy == "skip":
-                        invalid = True
-                        break
+                        return None
                     v = 0.0
                 if a == b and a in AA20:
                     ident += 1
                 if v >= 0.5:
                     strong += 1
                 s += v
-            if invalid:
-                continue
             if prefilter_min_strong and strong < prefilter_min_strong:
-                continue
+                return None
             if prefilter_min_identity and ident < prefilter_min_identity:
-                continue
-            if rank_by == "identity":
-                if best_ident is None or ident > best_ident or (ident == best_ident and s > best):
-                    best = s
-                    best_ident = ident
-                    best_i = i
-                    best_j = j
-            else:
-                if s > best:
-                    best = s
-                    best_ident = ident
-                    best_i = i
-                    best_j = j
-    else:
-        for i in range(0, n1 - window + 1):
-            for j in range(0, n2 - window + 1):
-                if require_positions2:
-                    if any(seq2[j + off] not in allowed for off, allowed in require_positions2):
-                        continue
-                if prefix is not None:
-                    end = j + (window - kmer_len + 1)
-                    if end > len(prefix) - 1:
-                        continue
-                    if prefix[end] - prefix[j] < kmer_min:
-                        continue
-                if filter_charge_runs:
-                    win1 = seq1[i : i + window]
-                    win2 = seq2[j : j + window]
-                    if has_charge_run(win1) or has_charge_run(win2):
-                        continue
-                s = 0.0
-                invalid = False
-                strong = 0
-                ident = 0
-                for k in range(window):
-                    a = seq1[i + k]
-                    b = seq2[j + k]
-                    v = clustal_pair_score(a, b)
-                    if v is None:
-                        if unknown_policy == "error":
-                            raise ValueError("Unknown residue in Clustal scan")
-                        if unknown_policy == "skip":
-                            invalid = True
-                            break
-                        v = 0.0
-                    if a == b and a in AA20:
-                        ident += 1
-                    if v >= 0.5:
-                        strong += 1
-                    s += v
-                if invalid:
-                    continue
-                if prefilter_min_strong and strong < prefilter_min_strong:
-                    continue
-                if prefilter_min_identity and ident < prefilter_min_identity:
-                    continue
-                if rank_by == "identity":
-                    if best_ident is None or ident > best_ident or (ident == best_ident and s > best):
-                        best = s
-                        best_ident = ident
-                        best_i = i
-                        best_j = j
-                else:
-                    if s > best:
-                        best = s
-                        best_ident = ident
-                        best_i = i
-                        best_j = j
+                return None
+            return s, ident
 
-    if best_i is None or best_j is None:
-        return None, None, None, None
-    return best, best_i, best_j, best_ident
+        if use_sampling:
+            rng = random.Random(rng_seed)
+            for _ in range(max_evals):
+                i = rng.randrange(0, n1 - window + 1)
+                j = rng.randrange(0, len(seq2_local) - window + 1)
+                result = evaluate_window(i, j)
+                if result is None:
+                    continue
+                s, ident = result
+                if rank_key(s, ident) > rank_key(best, best_ident or 0):
+                    best, best_ident, best_i, best_j = s, ident, i, j
+        else:
+            for i in range(0, n1 - window + 1):
+                for j in range(0, len(seq2_local) - window + 1):
+                    result = evaluate_window(i, j)
+                    if result is None:
+                        continue
+                    s, ident = result
+                    if rank_key(s, ident) > rank_key(best, best_ident or 0):
+                        best, best_ident, best_i, best_j = s, ident, i, j
+
+        if best_i is None or best_j is None:
+            return None, None, None, None
+        return best, best_i, best_j, best_ident
+
+    def pack(score, i, j, ident, orient):
+        if return_orientation:
+            return score, i, j, ident, orient
+        return score, i, j, ident
+
+    best_f = run(seq2)
+    if orientation == _ORIENTATION_FORWARD:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    best_r = run(seq2[::-1])
+    if best_r[2] is not None:
+        best_r = (best_r[0], best_r[1], _reverse_start_index(n2, window, best_r[2]), best_r[3])
+
+    if orientation == _ORIENTATION_REVERSE:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+
+    if best_f[0] is None:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    if best_r[0] is None:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    if rank_key(best_r[0], best_r[3] or 0) > rank_key(best_f[0], best_f[3] or 0):
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
 
 
 def best_ungapped_window_pair_clustal_topk(
@@ -724,8 +705,11 @@ def best_ungapped_window_pair_clustal_topk(
     rank_by: str = "identity",
     topk: int = 3,
     filter_charge_runs: bool = False,
-) -> List[Tuple[float, int, int, int]]:
+    orientation: str = "both",
+    include_orientation: bool = False,
+) -> List[Tuple]:
     """Return top-k windows ranked by identity (or score) with tie-breaker score."""
+    orientation = _normalize_orientation(orientation)
     if window <= 0:
         return []
     n1 = len(seq1)
@@ -733,132 +717,125 @@ def best_ungapped_window_pair_clustal_topk(
     if n1 < window or n2 < window:
         return []
 
-    prefix = None
-    if kmer_len and kmer_len > 0 and kmer_len <= window:
-        seq1_kmers = set()
-        for i in range(0, n1 - kmer_len + 1):
-            kmer = seq1[i : i + kmer_len]
-            if any(c not in AA20 for c in kmer):
-                if unknown_policy == "error":
-                    raise ValueError("Unknown residue in Clustal k-mer scan")
-                continue
-            seq1_kmers.add(kmer)
-        if not seq1_kmers:
-            return []
-        hits = _kmer_hits(seq2, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
-        if not hits:
-            return []
-        prefix = [0]
-        for h in hits:
-            prefix.append(prefix[-1] + (1 if h else 0))
-
-    total_pairs = (n1 - window + 1) * (n2 - window + 1)
-    use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
-    rng = random.Random(rng_seed)
-
-    heap: List[Tuple[Tuple[int, float], float, int, int, int]] = []
-
-    def push_hit(score: float, ident: int, i: int, j: int) -> None:
-        key = (ident, score) if rank_by == "identity" else (int(score * 1000), score)
-        item = (key, score, ident, i, j)
-        if len(heap) < topk:
-            heapq.heappush(heap, item)
-        else:
-            if key > heap[0][0]:
-                heapq.heapreplace(heap, item)
-
-    if use_sampling:
-        for _ in range(max_evals):
-            i = rng.randrange(0, n1 - window + 1)
-            j = rng.randrange(0, n2 - window + 1)
-            if require_positions2:
-                if any(seq2[j + off] not in allowed for off, allowed in require_positions2):
+    def run(seq2_local: str) -> List[Tuple[float, int, int, int]]:
+        prefix = None
+        if kmer_len and kmer_len > 0 and kmer_len <= window:
+            seq1_kmers = set()
+            for i in range(0, n1 - kmer_len + 1):
+                kmer = seq1[i : i + kmer_len]
+                if any(c not in AA20 for c in kmer):
+                    if unknown_policy == "error":
+                        raise ValueError("Unknown residue in Clustal k-mer scan")
                     continue
+                seq1_kmers.add(kmer)
+            if not seq1_kmers:
+                return []
+            hits = _kmer_hits(seq2_local, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
+            if not hits:
+                return []
+            prefix = [0]
+            for h in hits:
+                prefix.append(prefix[-1] + (1 if h else 0))
+
+        total_pairs = (n1 - window + 1) * (len(seq2_local) - window + 1)
+        use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
+        rng = random.Random(rng_seed)
+
+        heap: List[Tuple[Tuple[int, float], float, int, int, int]] = []
+
+        def push_hit(score: float, ident: int, i: int, j: int) -> None:
+            key = (ident, score) if rank_by == "identity" else (int(score * 1000), score)
+            item = (key, score, ident, i, j)
+            if len(heap) < topk:
+                heapq.heappush(heap, item)
+            else:
+                if key > heap[0][0]:
+                    heapq.heapreplace(heap, item)
+
+        def evaluate_window(i: int, j: int) -> Optional[Tuple[float, int]]:
+            if require_positions2:
+                if any(seq2_local[j + off] not in allowed for off, allowed in require_positions2):
+                    return None
             if prefix is not None:
                 end = j + (window - kmer_len + 1)
                 if end > len(prefix) - 1:
-                    continue
+                    return None
                 if prefix[end] - prefix[j] < kmer_min:
-                    continue
+                    return None
             if filter_charge_runs:
                 win1 = seq1[i : i + window]
-                win2 = seq2[j : j + window]
+                win2 = seq2_local[j : j + window]
                 if has_charge_run(win1) or has_charge_run(win2):
-                    continue
+                    return None
             s = 0.0
-            invalid = False
             strong = 0
             ident = 0
             for k in range(window):
                 a = seq1[i + k]
-                b = seq2[j + k]
+                b = seq2_local[j + k]
                 v = clustal_pair_score(a, b)
                 if v is None:
                     if unknown_policy == "error":
                         raise ValueError("Unknown residue in Clustal scan")
                     if unknown_policy == "skip":
-                        invalid = True
-                        break
+                        return None
                     v = 0.0
                 if a == b and a in AA20:
                     ident += 1
                 if v >= 0.5:
                     strong += 1
                 s += v
-            if invalid:
-                continue
             if prefilter_min_strong and strong < prefilter_min_strong:
-                continue
+                return None
             if prefilter_min_identity and ident < prefilter_min_identity:
-                continue
-            push_hit(s, ident, i, j)
-    else:
-        for i in range(0, n1 - window + 1):
-            for j in range(0, n2 - window + 1):
-                if require_positions2:
-                    if any(seq2[j + off] not in allowed for off, allowed in require_positions2):
-                        continue
-                if prefix is not None:
-                    end = j + (window - kmer_len + 1)
-                    if end > len(prefix) - 1:
-                        continue
-                    if prefix[end] - prefix[j] < kmer_min:
-                        continue
-                if filter_charge_runs:
-                    win1 = seq1[i : i + window]
-                    win2 = seq2[j : j + window]
-                    if has_charge_run(win1) or has_charge_run(win2):
-                        continue
-                s = 0.0
-                invalid = False
-                strong = 0
-                ident = 0
-                for k in range(window):
-                    a = seq1[i + k]
-                    b = seq2[j + k]
-                    v = clustal_pair_score(a, b)
-                    if v is None:
-                        if unknown_policy == "error":
-                            raise ValueError("Unknown residue in Clustal scan")
-                        if unknown_policy == "skip":
-                            invalid = True
-                            break
-                        v = 0.0
-                    if a == b and a in AA20:
-                        ident += 1
-                    if v >= 0.5:
-                        strong += 1
-                    s += v
-                if invalid:
-                    continue
-                if prefilter_min_strong and strong < prefilter_min_strong:
-                    continue
-                if prefilter_min_identity and ident < prefilter_min_identity:
-                    continue
-                push_hit(s, ident, i, j)
+                return None
+            return s, ident
 
-    results = sorted(heap, key=lambda x: x[0], reverse=True)
-    return [(score, ident, i, j) for _key, score, ident, i, j in results]
+        if use_sampling:
+            for _ in range(max_evals):
+                i = rng.randrange(0, n1 - window + 1)
+                j = rng.randrange(0, len(seq2_local) - window + 1)
+                result = evaluate_window(i, j)
+                if result:
+                    push_hit(result[0], result[1], i, j)
+        else:
+            for i in range(0, n1 - window + 1):
+                for j in range(0, len(seq2_local) - window + 1):
+                    result = evaluate_window(i, j)
+                    if result:
+                        push_hit(result[0], result[1], i, j)
+
+        results = sorted(heap, key=lambda x: x[0], reverse=True)
+        return [(score, ident, i, j) for _key, score, ident, i, j in results]
+
+    def rank_key(score: float, ident: int) -> Tuple[int, float]:
+        return (ident, score) if rank_by == "identity" else (int(score * 1000), score)
+
+    def with_orientation(hits: List[Tuple[float, int, int, int]], orient: str) -> List[Tuple]:
+        if include_orientation:
+            return [(score, ident, i, j, orient) for score, ident, i, j in hits]
+        return hits  # type: ignore[return-value]
+
+    hits_f = run(seq2)
+    if orientation == _ORIENTATION_FORWARD:
+        return with_orientation(hits_f, _ORIENTATION_FORWARD)
+
+    hits_r = run(seq2[::-1])
+    hits_r = [
+        (score, ident, i, _reverse_start_index(n2, window, j)) for score, ident, i, j in hits_r
+    ]
+    if orientation == _ORIENTATION_REVERSE:
+        return with_orientation(hits_r, _ORIENTATION_REVERSE)
+
+    merged_tagged = (
+        [(score, ident, i, j, _ORIENTATION_FORWARD) for score, ident, i, j in hits_f]
+        + [(score, ident, i, j, _ORIENTATION_REVERSE) for score, ident, i, j in hits_r]
+    )
+    merged_tagged.sort(key=lambda x: rank_key(x[0], x[1]), reverse=True)
+    merged_tagged = merged_tagged[:topk]
+    if include_orientation:
+        return merged_tagged  # type: ignore[return-value]
+    return [(score, ident, i, j) for score, ident, i, j, _orient in merged_tagged]
 
 
 def overlaps_fraction(a_start: int, a_end: int, b_start: int, b_end: int) -> float:
@@ -889,7 +866,9 @@ def clustal_search_fasta_global(
     require_positions2: Optional[List[Tuple[int, Set[str]]]] = None,
     topk: int,
     filter_charge_runs: bool = False,
-) -> List[Tuple[float, float, int, int, str, str, str]]:
+    orientation: str = "both",
+    include_orientation: bool = False,
+) -> List[Tuple]:
     rng = random.Random(rng_seed)
     hits: List[Tuple[float, float, int, int, str, str, str]] = []
     if max_evals <= 0:
@@ -897,6 +876,7 @@ def clustal_search_fasta_global(
     if len(seq1) < window:
         return []
 
+    orientation = _normalize_orientation(orientation)
     records = []
     for name, seq in read_fasta_all(fasta_path):
         s = seq.upper()
@@ -907,7 +887,10 @@ def clustal_search_fasta_global(
                 raise ValueError("Unknown residue in FASTA for Clustal scan")
             if unknown_policy == "skip":
                 continue
-        records.append((name, s))
+        if orientation in (_ORIENTATION_FORWARD, _ORIENTATION_BOTH):
+            records.append((name, s, _ORIENTATION_FORWARD, s, len(s)))
+        if orientation in (_ORIENTATION_REVERSE, _ORIENTATION_BOTH):
+            records.append((name, s[::-1], _ORIENTATION_REVERSE, s, len(s)))
 
     if not records:
         return []
@@ -926,7 +909,7 @@ def clustal_search_fasta_global(
             return []
 
     for _ in range(max_evals):
-        name2, seq2 = rng.choice(records)
+        name2, seq2, orient, seq2_orig, n2 = rng.choice(records)
         i = rng.randrange(0, len(seq1) - window + 1)
         j = rng.randrange(0, len(seq2) - window + 1)
         if require_positions2:
@@ -972,10 +955,15 @@ def clustal_search_fasta_global(
             continue
         if prefilter_min_identity and ident < prefilter_min_identity:
             continue
+        j_orig = _reverse_start_index(n2, window, j) if orient == "reverse" else j
         win1 = seq1[i : i + window]
-        win2 = seq2[j : j + window]
+        win2_raw = seq2_orig[j_orig : j_orig + window]
+        win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
         _sym, _s, _sn, _n = clustal_similarity(win1, win2)
-        hits.append((score, _sn, i, j, name2, win1, win2))
+        if include_orientation:
+            hits.append((score, _sn, i, j_orig, name2, win1, win2, orient))
+        else:
+            hits.append((score, _sn, i, j_orig, name2, win1, win2))
 
     hits.sort(key=lambda x: x[0], reverse=True)
     return hits[: max(1, topk)]
@@ -1325,6 +1313,22 @@ def get_mj_scorer(mj):
     raise TypeError(f"Unsupported MJ matrix type: {type(mj)}")
 
 
+_ORIENTATION_FORWARD = "forward"
+_ORIENTATION_REVERSE = "reverse"
+_ORIENTATION_BOTH = "both"
+
+
+def _normalize_orientation(orientation: str) -> str:
+    o = orientation.lower()
+    if o not in (_ORIENTATION_FORWARD, _ORIENTATION_REVERSE, _ORIENTATION_BOTH):
+        raise ValueError(f"Unknown orientation {orientation!r}; use 'forward', 'reverse', or 'both'")
+    return o
+
+
+def _reverse_start_index(n2: int, window: int, j_rev: int) -> int:
+    return n2 - j_rev - window
+
+
 def best_ungapped_window_pair(
     seq1,
     seq2,
@@ -1335,6 +1339,8 @@ def best_ungapped_window_pair(
     rng_seed=1,
     unknown_policy="error",
     context_bonus: bool = False,
+    orientation: str = "both",
+    return_orientation: bool = False,
 ):
     """
     Scan all ungapped window pairs of fixed length and return the best pair.
@@ -1346,6 +1352,7 @@ def best_ungapped_window_pair(
 
     If no valid windows exist, returns (None, None, None, None).
     """
+    orientation = _normalize_orientation(orientation)
     if window <= 0:
         return None, None, None, None
     n1 = len(seq1)
@@ -1353,69 +1360,35 @@ def best_ungapped_window_pair(
     if n1 < window or n2 < window:
         return None, None, None, None
 
-    total_pairs = (n1 - window + 1) * (n2 - window + 1)
-    use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
+    def run(seq2_local):
+        total_pairs = (n1 - window + 1) * (len(seq2_local) - window + 1)
+        use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
 
-    # Localize for speed
-    mj_score = get_mj_scorer(mj)
-    s1 = seq1
-    s2 = seq2
-    w = window
+        mj_score = get_mj_scorer(mj)
+        s1 = seq1
+        s2 = seq2_local
+        w = window
 
-    if mode == "min":
-        best = float("inf")
-        def better(x, y): return x < y
-    else:
-        best = float("-inf")
-        def better(x, y): return x > y
+        if mode == "min":
+            best = float("inf")
+            def better(x, y): return x < y
+        else:
+            best = float("-inf")
+            def better(x, y): return x > y
 
-    best_i = None
-    best_j = None
-    best_per = None
-    use_context = context_bonus
+        best_i = None
+        best_j = None
+        best_per = None
+        use_context = context_bonus
 
-    if use_sampling:
-        import random
-        rng = random.Random(rng_seed)
-        for _ in range(max_evals):
-            i = rng.randrange(0, n1 - w + 1)
-            j = rng.randrange(0, n2 - w + 1)
-            per = []
-            s = 0.0
-            for k in range(w):
-                try:
-                    v = mj_score(s1[i + k], s2[j + k])
-                except KeyError:
-                    if unknown_policy == "error":
-                        raise
-                    if unknown_policy == "skip":
-                        per = None
-                        break
-                    v = 0.0
-                per.append(v)
-                s += v
-            if per is None:
-                continue
-            if use_context:
-                s += sum(
-                    context_bonus_aligned(
-                        s1[i : i + w],
-                        s2[j : j + w],
-                        mj,
-                        unknown_policy=unknown_policy,
-                    )
-                )
-            if better(s, best):
-                best = s
-                best_i = i
-                best_j = j
-                best_per = per
-    else:
-        for i in range(0, n1 - w + 1):
-            for j in range(0, n2 - w + 1):
+        if use_sampling:
+            import random
+            rng = random.Random(rng_seed)
+            for _ in range(max_evals):
+                i = rng.randrange(0, n1 - w + 1)
+                j = rng.randrange(0, len(s2) - w + 1)
                 per = []
                 s = 0.0
-                invalid = False
                 for k in range(w):
                     try:
                         v = mj_score(s1[i + k], s2[j + k])
@@ -1423,12 +1396,12 @@ def best_ungapped_window_pair(
                         if unknown_policy == "error":
                             raise
                         if unknown_policy == "skip":
-                            invalid = True
+                            per = None
                             break
                         v = 0.0
                     per.append(v)
                     s += v
-                if invalid:
+                if per is None:
                     continue
                 if use_context:
                     s += sum(
@@ -1444,11 +1417,71 @@ def best_ungapped_window_pair(
                     best_i = i
                     best_j = j
                     best_per = per
+        else:
+            for i in range(0, n1 - w + 1):
+                for j in range(0, len(s2) - w + 1):
+                    per = []
+                    s = 0.0
+                    invalid = False
+                    for k in range(w):
+                        try:
+                            v = mj_score(s1[i + k], s2[j + k])
+                        except KeyError:
+                            if unknown_policy == "error":
+                                raise
+                            if unknown_policy == "skip":
+                                invalid = True
+                                break
+                            v = 0.0
+                        per.append(v)
+                        s += v
+                    if invalid:
+                        continue
+                    if use_context:
+                        s += sum(
+                            context_bonus_aligned(
+                                s1[i : i + w],
+                                s2[j : j + w],
+                                mj,
+                                unknown_policy=unknown_policy,
+                            )
+                        )
+                    if better(s, best):
+                        best = s
+                        best_i = i
+                        best_j = j
+                        best_per = per
 
-    return best, best_i, best_j, best_per
+        return best, best_i, best_j, best_per
+
+    def pack(score, i, j, per, orient):
+        if return_orientation:
+            return score, i, j, per, orient
+        return score, i, j, per
+
+    best_f = run(seq2)
+    if orientation == _ORIENTATION_FORWARD:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    best_r = run(seq2[::-1])
+    if best_r[2] is not None:
+        best_r = (best_r[0], best_r[1], _reverse_start_index(n2, window, best_r[2]), best_r[3])
+
+    if orientation == _ORIENTATION_REVERSE:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+
+    if best_f[0] is None:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    if best_r[0] is None:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    take_rev = best_r[0] < best_f[0] if mode == "min" else best_r[0] > best_f[0]
+    if take_rev:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
 
 
-def seed_windows(
+def _seed_windows_single(
     seq1: str,
     seq2: str,
     mj,
@@ -1457,19 +1490,15 @@ def seed_windows(
     score_max: float,
     kmax: int,
     kmin: int,
-    rank_by_anchors: bool = False,
-    anchor_thr: float = -25.0,
-    prefilter_len: int = 0,
-    prefilter_score_max: Optional[float] = None,
-    prefilter_kmax: int = 0,
-    prefilter_kmin: int = 0,
-    unknown_policy: str = "error",
-    context_bonus: bool = False,
+    rank_by_anchors: bool,
+    anchor_thr: float,
+    prefilter_len: int,
+    prefilter_score_max: Optional[float],
+    prefilter_kmax: int,
+    prefilter_kmin: int,
+    unknown_policy: str,
+    context_bonus: bool,
 ) -> List[Tuple[float, int, int, int]]:
-    """Return seed windows (score, i, j, anchors) filtered by score_max and capped by kmax.
-
-    If fewer than kmin seeds pass the score_max filter, the best kmin are kept.
-    """
     if window <= 0:
         return []
     n1 = len(seq1)
@@ -1477,8 +1506,6 @@ def seed_windows(
     if n1 < window or n2 < window:
         return []
 
-    # Use a faster numpy path when available (especially for large FASTA scans).
-    # Anchor-first ranking needs per-position counts, so skip numpy in that case.
     if not rank_by_anchors:
         hits_np = _seed_windows_numpy(
             seq1,
@@ -1580,10 +1607,10 @@ def seed_windows(
         return []
 
     if rank_by_anchors:
-        hits.sort(key=lambda x: (-x[3], x[0]))  # most anchors, then most negative
+        hits.sort(key=lambda x: (-x[3], x[0]))
         filtered = [h for h in hits if h[0] <= score_max]
     else:
-        hits.sort(key=lambda x: x[0])  # most negative first
+        hits.sort(key=lambda x: x[0])
         filtered = [h for h in hits if h[0] <= score_max]
 
     if len(filtered) < kmin:
@@ -1595,12 +1622,107 @@ def seed_windows(
     return filtered
 
 
+def seed_windows(
+    seq1: str,
+    seq2: str,
+    mj,
+    *,
+    window: int,
+    score_max: float,
+    kmax: int,
+    kmin: int,
+    rank_by_anchors: bool = False,
+    anchor_thr: float = -25.0,
+    prefilter_len: int = 0,
+    prefilter_score_max: Optional[float] = None,
+    prefilter_kmax: int = 0,
+    prefilter_kmin: int = 0,
+    unknown_policy: str = "error",
+    context_bonus: bool = False,
+    orientation: str = "both",
+    include_orientation: bool = False,
+) -> List[Tuple]:
+    """Return seed windows (score, i, j, anchors) filtered by score_max and capped by kmax.
+
+    If fewer than kmin seeds pass the score_max filter, the best kmin are kept.
+    """
+    orientation = _normalize_orientation(orientation)
+    if window <= 0:
+        return []
+    n2 = len(seq2)
+    if len(seq1) < window or n2 < window:
+        return []
+
+    def with_orientation(hits: List[Tuple[float, int, int, int]], orient: str) -> List[Tuple]:
+        if include_orientation:
+            return [(score, i, j, anchors, orient) for score, i, j, anchors in hits]
+        return hits  # type: ignore[return-value]
+
+    hits_f = _seed_windows_single(
+        seq1,
+        seq2,
+        mj,
+        window=window,
+        score_max=score_max,
+        kmax=kmax,
+        kmin=kmin,
+        rank_by_anchors=rank_by_anchors,
+        anchor_thr=anchor_thr,
+        prefilter_len=prefilter_len,
+        prefilter_score_max=prefilter_score_max,
+        prefilter_kmax=prefilter_kmax,
+        prefilter_kmin=prefilter_kmin,
+        unknown_policy=unknown_policy,
+        context_bonus=context_bonus,
+    )
+    if orientation == _ORIENTATION_FORWARD:
+        return with_orientation(hits_f, _ORIENTATION_FORWARD)
+
+    hits_r = _seed_windows_single(
+        seq1,
+        seq2[::-1],
+        mj,
+        window=window,
+        score_max=score_max,
+        kmax=kmax,
+        kmin=kmin,
+        rank_by_anchors=rank_by_anchors,
+        anchor_thr=anchor_thr,
+        prefilter_len=prefilter_len,
+        prefilter_score_max=prefilter_score_max,
+        prefilter_kmax=prefilter_kmax,
+        prefilter_kmin=prefilter_kmin,
+        unknown_policy=unknown_policy,
+        context_bonus=context_bonus,
+    )
+    hits_r = [
+        (score, i, _reverse_start_index(n2, window, j), anchors) for score, i, j, anchors in hits_r
+    ]
+    if orientation == _ORIENTATION_REVERSE:
+        return with_orientation(hits_r, _ORIENTATION_REVERSE)
+
+    merged_tagged = (
+        [(score, i, j, anchors, _ORIENTATION_FORWARD) for score, i, j, anchors in hits_f]
+        + [(score, i, j, anchors, _ORIENTATION_REVERSE) for score, i, j, anchors in hits_r]
+    )
+    if rank_by_anchors:
+        merged_tagged.sort(key=lambda x: (-x[3], x[0]))
+    else:
+        merged_tagged.sort(key=lambda x: x[0])
+    if kmax and len(merged_tagged) > kmax:
+        merged_tagged = merged_tagged[:kmax]
+    if include_orientation:
+        return merged_tagged  # type: ignore[return-value]
+    return [(score, i, j, anchors) for score, i, j, anchors, _orient in merged_tagged]
+
+
 def _seed_unpack(seed):
     score = seed[0]
     i = seed[1]
     j = seed[2]
     anchors = seed[3] if len(seed) > 3 else None
-    return score, i, j, anchors
+    orient = seed[4] if len(seed) > 4 else None
+    return score, i, j, anchors, orient
 
 
 def _seed_windows_numpy(
@@ -3314,6 +3436,7 @@ def seed_null_best_scores(
     unknown_policy: str = "error",
     seed: Optional[int] = None,
     context_bonus: bool = False,
+    orientation: str = "both",
 ) -> List[float]:
     """Null scores for the best ungapped window by shuffling seq2."""
     rng = random.Random(seed)
@@ -3330,6 +3453,7 @@ def seed_null_best_scores(
             mode="min",
             unknown_policy=unknown_policy,
             context_bonus=context_bonus,
+            orientation=orientation,
         )
         if score is not None:
             scores.append(float(score))
@@ -3681,6 +3805,12 @@ def main(argv=None) -> int:
         type=int,
         default=0,
         help="Optional cap on evaluated window pairs (0 = no cap). If set and the search space exceeds this, random sampling is used",
+    )
+    p.add_argument(
+        "--orientation",
+        choices=["forward", "reverse", "both"],
+        default="both",
+        help="Sequence-2 orientation for window/seed searches (default: both)",
     )
 
     # Auto-align (ungapped): scan all window pairs of a fixed length and use the best-scoring pair as the effective alignment.
@@ -4226,7 +4356,7 @@ def main(argv=None) -> int:
                             strong_min,
                             math.ceil(args.clustal_prefilter_strong_frac * args.clustal_len),
                         )
-                    score, i, j, ident_best = best_ungapped_window_pair_clustal(
+                    score, i, j, ident_best, orient = best_ungapped_window_pair_clustal(
                         s1,
                         seq2,
                         window=args.clustal_len,
@@ -4240,39 +4370,42 @@ def main(argv=None) -> int:
                         require_positions2=require_positions2,
                         rank_by=args.clustal_rank,
                         filter_charge_runs=args.filter_charge_runs,
+                        orientation=args.orientation,
+                        return_orientation=True,
                     )
                     if score is None or i is None or j is None:
                         continue
                     win1 = s1[i : i + args.clustal_len]
-                    win2 = seq2[j : j + args.clustal_len]
+                    win2_raw = seq2[j : j + args.clustal_len]
+                    win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
                     _sym, _s, _sn, _n = clustal_similarity(win1, win2)
-                    hits.append((score, _sn, i, j, name2, win1, win2))
+                    hits.append((score, _sn, i, j, name2, win1, win2, orient))
 
                 hits.sort(key=lambda x: x[0], reverse=True)
                 if args.clustal_collapse_species:
                     groups = {}
-                    for score, sn, i, j, name2, win1, win2 in hits:
+                    for score, sn, i, j, name2, win1, win2, orient in hits:
                         base, entry = clustal_entry_key(name2)
-                        groups.setdefault(base, []).append((score, sn, i, j, name2, win1, win2))
+                        groups.setdefault(base, []).append((score, sn, i, j, name2, win1, win2, orient))
                     collapsed = []
                     for base, items in groups.items():
                         best = max(items, key=lambda x: (x[0], x[1]))
-                        collapsed.append((best[0], best[1], best[2], best[3], best[4], best[5], best[6], len(items)))
+                        collapsed.append((best[0], best[1], best[2], best[3], best[4], best[5], best[6], best[7], len(items)))
                     collapsed.sort(key=lambda x: x[0], reverse=True)
                     topk = collapsed[: max(1, args.clustal_topk)]
                     print(f"Clustal search top {len(topk)} across FASTA2 (collapsed)")
-                    for idx, (score, sn, i, j, name2, win1, win2, count) in enumerate(topk, start=1):
+                    for idx, (score, sn, i, j, name2, win1, win2, orient, count) in enumerate(topk, start=1):
                         print(
                             f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)} "
                             f"pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  "
-                            f"{name2}  {win1} ↔ {win2}  count={count}"
+                            f"orient={orient}  {name2}  {win1} ↔ {win2}  count={count}"
                         )
                 else:
                     topk = hits[: max(1, args.clustal_topk)]
                     print(f"Clustal search top {len(topk)} across FASTA2 (exhaustive per-entry)")
-                    for idx, (score, sn, i, j, name2, win1, win2) in enumerate(topk, start=1):
+                    for idx, (score, sn, i, j, name2, win1, win2, orient) in enumerate(topk, start=1):
                         print(
-                            f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}  pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  {name2}  {win1} ↔ {win2}"
+                            f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}  pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  orient={orient}  {name2}  {win1} ↔ {win2}"
                         )
                 return 0
             if args.clustal_global_evals and args.clustal_global_evals > 0:
@@ -4299,30 +4432,32 @@ def main(argv=None) -> int:
                     require_positions2=require_positions2,
                     topk=args.clustal_topk,
                     filter_charge_runs=args.filter_charge_runs,
+                    orientation=args.orientation,
+                    include_orientation=True,
                 )
                 if args.clustal_collapse_species:
                     groups = {}
-                    for score, sn, i, j, name2, win1, win2 in hits:
+                    for score, sn, i, j, name2, win1, win2, orient in hits:
                         base, entry = clustal_entry_key(name2)
-                        groups.setdefault(base, []).append((score, sn, i, j, name2, win1, win2))
+                        groups.setdefault(base, []).append((score, sn, i, j, name2, win1, win2, orient))
                     collapsed = []
                     for base, items in groups.items():
                         best = max(items, key=lambda x: (x[0], x[1]))
-                        collapsed.append((best[0], best[1], best[2], best[3], best[4], best[5], best[6], len(items)))
+                        collapsed.append((best[0], best[1], best[2], best[3], best[4], best[5], best[6], best[7], len(items)))
                     collapsed.sort(key=lambda x: x[0], reverse=True)
                     topk = collapsed[: max(1, args.clustal_topk)]
                     print(f"Clustal search top {len(topk)} across FASTA2 (collapsed)")
-                    for idx, (score, sn, i, j, name2, win1, win2, count) in enumerate(topk, start=1):
+                    for idx, (score, sn, i, j, name2, win1, win2, orient, count) in enumerate(topk, start=1):
                         print(
                             f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)} "
                             f"pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  "
-                            f"{name2}  {win1} ↔ {win2}  count={count}"
+                            f"orient={orient}  {name2}  {win1} ↔ {win2}  count={count}"
                         )
                 else:
                     print(f"Clustal search top {len(hits)} across FASTA2 (global sampling)")
-                    for idx, (score, sn, i, j, name2, win1, win2) in enumerate(hits, start=1):
+                    for idx, (score, sn, i, j, name2, win1, win2, orient) in enumerate(hits, start=1):
                         print(
-                            f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}  pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  {name2}  {win1} ↔ {win2}"
+                            f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}  pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  orient={orient}  {name2}  {win1} ↔ {win2}"
                         )
                 return 0
             hits = []
@@ -4337,7 +4472,7 @@ def main(argv=None) -> int:
                         strong_min,
                         math.ceil(args.clustal_prefilter_strong_frac * args.clustal_len),
                     )
-                score, i, j, ident_best = best_ungapped_window_pair_clustal(
+                score, i, j, ident_best, orient = best_ungapped_window_pair_clustal(
                     s1,
                     seq2,
                     window=args.clustal_len,
@@ -4351,39 +4486,42 @@ def main(argv=None) -> int:
                     require_positions2=require_positions2,
                     rank_by=args.clustal_rank,
                     filter_charge_runs=args.filter_charge_runs,
+                    orientation=args.orientation,
+                    return_orientation=True,
                 )
                 if score is None or i is None or j is None:
                     continue
                 win1 = s1[i : i + args.clustal_len]
-                win2 = seq2[j : j + args.clustal_len]
+                win2_raw = seq2[j : j + args.clustal_len]
+                win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
                 _sym, _s, _sn, _n = clustal_similarity(win1, win2)
-                hits.append((score, _sn, i, j, name2, win1, win2))
+                hits.append((score, _sn, i, j, name2, win1, win2, orient))
 
             hits.sort(key=lambda x: x[0], reverse=True)
             if args.clustal_collapse_species:
                 groups = {}
-                for score, sn, i, j, name2, win1, win2 in hits:
+                for score, sn, i, j, name2, win1, win2, orient in hits:
                     base, entry = clustal_entry_key(name2)
-                    groups.setdefault(base, []).append((score, sn, i, j, name2, win1, win2))
+                    groups.setdefault(base, []).append((score, sn, i, j, name2, win1, win2, orient))
                 collapsed = []
                 for base, items in groups.items():
                     best = max(items, key=lambda x: (x[0], x[1]))
-                    collapsed.append((best[0], best[1], best[2], best[3], best[4], best[5], best[6], len(items)))
+                    collapsed.append((best[0], best[1], best[2], best[3], best[4], best[5], best[6], best[7], len(items)))
                 collapsed.sort(key=lambda x: x[0], reverse=True)
                 topk = collapsed[: max(1, args.clustal_topk)]
                 print(f"Clustal search top {len(topk)} across FASTA2 (collapsed)")
-                for idx, (score, sn, i, j, name2, win1, win2, count) in enumerate(topk, start=1):
+                for idx, (score, sn, i, j, name2, win1, win2, orient, count) in enumerate(topk, start=1):
                     print(
                         f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)} "
                         f"pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  "
-                        f"{name2}  {win1} ↔ {win2}  count={count}"
+                        f"orient={orient}  {name2}  {win1} ↔ {win2}  count={count}"
                     )
             else:
                 topk = hits[: max(1, args.clustal_topk)]
                 print(f"Clustal search top {len(topk)} across FASTA2")
-                for idx, (score, sn, i, j, name2, win1, win2) in enumerate(topk, start=1):
+                for idx, (score, sn, i, j, name2, win1, win2, orient) in enumerate(topk, start=1):
                     print(
-                        f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}  pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  {name2}  {win1} ↔ {win2}"
+                        f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}  pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})  orient={orient}  {name2}  {win1} ↔ {win2}"
                     )
             return 0
 
@@ -4418,14 +4556,17 @@ def main(argv=None) -> int:
                         rank_by=args.clustal_rank,
                         topk=args.clustal_topk,
                         filter_charge_runs=args.filter_charge_runs,
+                        orientation=args.orientation,
+                        include_orientation=True,
                     )
                     if not hits:
                         continue
                     seen = set()
                     kept = []
-                    for idx, (score, ident, i, j) in enumerate(hits, start=1):
+                    for idx, (score, ident, i, j, orient) in enumerate(hits, start=1):
                         win1 = s1[i : i + L]
-                        win2 = s2[j : j + L]
+                        win2_raw = s2[j : j + L]
+                        win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
                         key_pair = (win1, win2)
                         if key_pair in seen:
                             continue
@@ -4440,15 +4581,16 @@ def main(argv=None) -> int:
                         _sym, _s, sn, _n = clustal_similarity(win1, win2)
                         print(
                             f"  len={L} [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}"
-                            f" id={ident} pos=({i+1}-{i+L},{j+1}-{j+L})  {win1} ↔ {win2}"
+                            f" id={ident} pos=({i+1}-{i+L},{j+1}-{j+L}) orient={orient}  {win1} ↔ {win2}"
                         )
-                    score, ident_best, i, j = hits[0]
+                    score, ident_best, i, j, orient = hits[0]
                     win1 = s1[i : i + L]
-                    win2 = s2[j : j + L]
+                    win2_raw = s2[j : j + L]
+                    win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
                     _sym, _s, sn, _n = clustal_similarity(win1, win2)
                     key = (ident_best, score)
                 else:
-                    score, i, j, ident_best = best_ungapped_window_pair_clustal(
+                    score, i, j, ident_best, orient = best_ungapped_window_pair_clustal(
                         s1,
                         s2,
                         window=L,
@@ -4462,30 +4604,33 @@ def main(argv=None) -> int:
                         require_positions2=require_positions2,
                         rank_by=args.clustal_rank,
                         filter_charge_runs=args.filter_charge_runs,
+                        orientation=args.orientation,
+                        return_orientation=True,
                     )
                     if score is None or i is None or j is None:
                         continue
                     win1 = s1[i : i + L]
-                    win2 = s2[j : j + L]
+                    win2_raw = s2[j : j + L]
+                    win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
                     _sym, _s, sn, _n = clustal_similarity(win1, win2)
                     id_note = f" id={ident_best}" if ident_best is not None else ""
                     print(
                         f"  len={L} score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}"
-                        f"{id_note} pos=({i+1}-{i+L},{j+1}-{j+L})  {win1} ↔ {win2}"
+                        f"{id_note} pos=({i+1}-{i+L},{j+1}-{j+L}) orient={orient}  {win1} ↔ {win2}"
                     )
                     key = (ident_best or 0, score) if args.clustal_rank == "identity" else (sn, score)
                 if best_overall is None or key > best_overall[0]:
-                    best_overall = (key, L, score, sn, ident_best, i, j, win1, win2)
+                    best_overall = (key, L, score, sn, ident_best, i, j, win1, win2, orient)
             if best_overall is None:
                 print("ERROR: no valid Clustal window found", file=sys.stderr)
                 return 2
-            _key, L, score, sn, ident_best, i, j, win1, win2 = best_overall
+            _key, L, score, sn, ident_best, i, j, win1, win2, orient = best_overall
             label = "identity" if args.clustal_rank == "identity" else "normalized"
             print(f"Best overall ({label})")
             id_note = f" id={ident_best}" if ident_best is not None else ""
             print(
                 f"  len={L} score={fmt_float(score, 2)} norm={fmt_float(sn, 3)}"
-                f"{id_note} pos=({i+1}-{i+L},{j+1}-{j+L})  {win1} ↔ {win2}"
+                f"{id_note} pos=({i+1}-{i+L},{j+1}-{j+L}) orient={orient}  {win1} ↔ {win2}"
             )
             return 0
 
@@ -4511,6 +4656,8 @@ def main(argv=None) -> int:
                 rank_by=args.clustal_rank,
                 topk=args.clustal_topk,
                 filter_charge_runs=args.filter_charge_runs,
+                orientation=args.orientation,
+                include_orientation=True,
             )
             if not hits:
                 print("ERROR: no valid Clustal window found", file=sys.stderr)
@@ -4518,9 +4665,10 @@ def main(argv=None) -> int:
             print(f"Clustal search top {len(hits)} (identity)")
             seen = set()
             kept = []
-            for idx, (score, ident, i, j) in enumerate(hits, start=1):
+            for idx, (score, ident, i, j, orient) in enumerate(hits, start=1):
                 win1 = s1[i : i + args.clustal_len]
-                win2 = s2[j : j + args.clustal_len]
+                win2_raw = s2[j : j + args.clustal_len]
+                win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
                 key = (win1, win2)
                 if key in seen:
                     continue
@@ -4535,12 +4683,12 @@ def main(argv=None) -> int:
                 _sym, _s, sn, _n = clustal_similarity(win1, win2)
                 print(
                     f"  [{idx}] score={fmt_float(score, 2)} norm={fmt_float(sn, 3)} id={ident} "
-                    f"pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})"
+                    f"pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len}) orient={orient}"
                 )
                 print(f"  {win1}")
                 print(f"  {win2}")
             return 0
-        score, i, j, ident_best = best_ungapped_window_pair_clustal(
+        score, i, j, ident_best, orient = best_ungapped_window_pair_clustal(
             s1,
             s2,
             window=args.clustal_len,
@@ -4554,16 +4702,19 @@ def main(argv=None) -> int:
             require_positions2=require_positions2,
             rank_by=args.clustal_rank,
             filter_charge_runs=args.filter_charge_runs,
+            orientation=args.orientation,
+            return_orientation=True,
         )
         if score is None or i is None or j is None:
             print("ERROR: no valid Clustal window found", file=sys.stderr)
             return 2
         win1 = s1[i : i + args.clustal_len]
-        win2 = s2[j : j + args.clustal_len]
+        win2_raw = s2[j : j + args.clustal_len]
+        win2 = win2_raw[::-1] if orient == "reverse" else win2_raw
         _sym, _s, sn, _n = clustal_similarity(win1, win2)
         print("Clustal search best window")
         print(
-            f"  score={fmt_float(score, 2)} norm={fmt_float(sn, 3)} pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len})"
+            f"  score={fmt_float(score, 2)} norm={fmt_float(sn, 3)} pos=({i+1}-{i+args.clustal_len},{j+1}-{j+args.clustal_len}) orient={orient}"
         )
         print(f"  {win1}")
         print(f"  {win2}")
@@ -4618,9 +4769,11 @@ def main(argv=None) -> int:
                     prefilter_kmin=args.seed_prefilter_kmin,
                     unknown_policy=args.unknown,
                     context_bonus=args.context_bonus,
+                    orientation=args.orientation,
+                    include_orientation=True,
                 )
-                for score, i, j, anchors in seeds:
-                    global_seeds.append((score, i, j, name2, seq2, anchors))
+                for score, i, j, anchors, orient in seeds:
+                    global_seeds.append((score, i, j, name2, seq2, anchors, orient))
 
             if global_seeds:
                 if args.seed_rank == "anchors":
@@ -4641,11 +4794,12 @@ def main(argv=None) -> int:
                     print(
                         f"Stage-1 global seeds {start_idx}-{end_idx} across {len(targets)} targets"
                     )
-                    for idx, (score, i, j, name2, seq2, anchors) in enumerate(topk, start=1):
+                    for idx, (score, i, j, name2, seq2, anchors, orient) in enumerate(topk, start=1):
                         s1_seed = s1[i : i + args.seed_len]
-                        s2_seed = seq2[j : j + args.seed_len]
+                        s2_seed_raw = seq2[j : j + args.seed_len]
+                        s2_seed = s2_seed_raw[::-1] if orient == "reverse" else s2_seed_raw
                         print(
-                            f"  [{idx}] score={fmt_float(score, 2)}  anchors={anchors}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  {name2}  {s1_seed} ↔ {s2_seed}"
+                            f"  [{idx}] score={fmt_float(score, 2)}  anchors={anchors}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  orient={orient}  {name2}  {s1_seed} ↔ {s2_seed}"
                         )
                     if not args.seed_select:
                         listed_only = True
@@ -4656,8 +4810,8 @@ def main(argv=None) -> int:
                                 file=sys.stderr,
                             )
                             return 2
-                        score, i, j, name2, seq2, _anchors = topk[args.seed_select - 1]
-                        preselected_seed = (score, i, j)
+                        score, i, j, name2, seq2, anchors, orient = topk[args.seed_select - 1]
+                        preselected_seed = (score, i, j, anchors, orient)
                         preselected_target = (name2, seq2)
             else:
                 listed_only = True
@@ -4688,6 +4842,8 @@ def main(argv=None) -> int:
                     prefilter_kmin=args.seed_prefilter_kmin,
                     unknown_policy=args.unknown,
                     context_bonus=args.context_bonus,
+                    orientation=args.orientation,
+                    include_orientation=True,
                 )
                 if not seeds:
                     continue
@@ -4696,11 +4852,12 @@ def main(argv=None) -> int:
                     topk = seeds[: min(args.seed_topk, len(seeds))]
                     print(f"Stage-1 top {len(topk)} seeds for {name2}")
                     for idx, seed in enumerate(topk, start=1):
-                        score, i, j, anchors = _seed_unpack(seed)
+                        score, i, j, anchors, orient = _seed_unpack(seed)
                         s1_seed = s1[i : i + args.seed_len]
-                        s2_seed = seq2[j : j + args.seed_len]
+                        s2_seed_raw = seq2[j : j + args.seed_len]
+                        s2_seed = s2_seed_raw[::-1] if orient == "reverse" else s2_seed_raw
                         print(
-                            f"  [{idx}] score={fmt_float(score, 2)}  anchors={anchors}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  {s1_seed} ↔ {s2_seed}"
+                            f"  [{idx}] score={fmt_float(score, 2)}  anchors={anchors}  pos=({i+1}-{i+args.seed_len},{j+1}-{j+args.seed_len})  orient={orient}  {s1_seed} ↔ {s2_seed}"
                         )
                     if not args.seed_select:
                         listed_only = True
@@ -4719,7 +4876,7 @@ def main(argv=None) -> int:
                         return 2
                     seeds = [topk[args.seed_select - 1]]
 
-            best_seed_score, best_seed_i, best_seed_j, best_seed_anchors = _seed_unpack(seeds[0])
+            best_seed_score, best_seed_i, best_seed_j, best_seed_anchors, best_seed_orient = _seed_unpack(seeds[0])
             seed_pct = None
             if args.seed_null and args.seed_null > 0:
                 null_scores = seed_null_best_scores(
@@ -4731,6 +4888,7 @@ def main(argv=None) -> int:
                     unknown_policy=args.unknown,
                     seed=args.seed,
                     context_bonus=args.context_bonus,
+                    orientation=args.orientation,
                 )
                 if null_scores:
                     seed_pct = sum(1 for x in null_scores if x <=
@@ -4755,8 +4913,11 @@ def main(argv=None) -> int:
                     "best_i": best_seed_i,
                     "best_j": best_seed_j,
                     "best_s1": s1[best_seed_i : best_seed_i + args.seed_len],
-                    "best_s2": seq2[best_seed_j : best_seed_j + args.seed_len],
+                    "best_s2": (seq2[best_seed_j : best_seed_j + args.seed_len][::-1]
+                                if best_seed_orient == "reverse"
+                                else seq2[best_seed_j : best_seed_j + args.seed_len]),
                     "best_anchors": best_seed_anchors,
+                    "best_orient": best_seed_orient,
                     "seed_pct": seed_pct,
                     "seed_null_stats": seed_null_stats,
                 }
@@ -4764,13 +4925,15 @@ def main(argv=None) -> int:
 
             seeds_to_extend = seeds if args.stage2_all_seeds else seeds[:1]
             for seed in seeds_to_extend:
-                score, i, j, _anchors = _seed_unpack(seed)
+                score, i, j, _anchors, orient = _seed_unpack(seed)
+                seq2_use = seq2 if orient != "reverse" else seq2[::-1]
+                seed_j_use = j if orient != "reverse" else _reverse_start_index(len(seq2), args.seed_len, j)
                 st2_score, aln1, aln2, start, anchor = stage2_best_from_seed(
                     s1,
-                    seq2,
+                    seq2_use,
                     mj,
                     seed_i=i,
-                    seed_j=j,
+                    seed_j=seed_j_use,
                     seed_len=args.seed_len,
                     flank=args.stage2_flank,
                     min_len=args.stage2_minlen,
@@ -4798,10 +4961,11 @@ def main(argv=None) -> int:
                 stage2_hits.append(
                     {
                         "name2": name2,
-                        "seq2": seq2,
+                        "seq2": seq2_use,
+                        "orient": orient,
                         "seed_score": score,
                         "seed_i": i,
-                        "seed_j": j,
+                        "seed_j": seed_j_use,
                         "stage2_score": st2_score,
                         "aln1": aln1,
                         "aln2": aln2,
@@ -4825,7 +4989,7 @@ def main(argv=None) -> int:
             anchors_str = f"  anchors={s['best_anchors']}" if s.get("best_anchors") is not None else ""
             print(
                 f"  {s['name2']}  seeds={s['seed_count']}  best={fmt_float(s['best_score'], 2)}"
-                f"{anchors_str}  @ ({s['best_i']+1},{s['best_j']+1})  null_pct={pct_str}"
+                f"{anchors_str}  @ ({s['best_i']+1},{s['best_j']+1})  orient={s['best_orient']}  null_pct={pct_str}"
             )
             print(f"    seed1: {s['best_s1']}")
             print(f"    seed2: {s['best_s2']}")
@@ -4948,7 +5112,7 @@ def main(argv=None) -> int:
                 f"[{idx}] {h['name2']}  stage2={fmt_float(score, 2)}  aln_len={aln_len}  null_pct={fmt_pct(pct, 4) if pct is not None else 'n/a'}  null_n={null_n}"
             )
             print(
-                f"  seed @ ({h['seed_i']+1},{h['seed_j']+1}) score={fmt_float(h['seed_score'], 2)}"
+                f"  seed @ ({h['seed_i']+1},{h['seed_j']+1}) orient={h.get('orient', 'forward')} score={fmt_float(h['seed_score'], 2)}"
             )
             if (
                 h.get("anchor_i") is not None
@@ -5023,7 +5187,7 @@ def main(argv=None) -> int:
                     len(full2) - args.auto_align_len + 1
                 )
 
-                score, i, j, per = best_ungapped_window_pair(
+                score, i, j, per, orient = best_ungapped_window_pair(
                     s1,
                     full2,
                     mj,
@@ -5032,6 +5196,8 @@ def main(argv=None) -> int:
                     max_evals=args.auto_align_max_evals,
                     unknown_policy=args.unknown,
                     context_bonus=args.context_bonus,
+                    orientation=args.orientation,
+                    return_orientation=True,
                 )
 
                 if score is None:
@@ -5039,7 +5205,7 @@ def main(argv=None) -> int:
                     continue
 
                 if best is None or score < best["score"]:
-                    best = {"score": score, "i": i, "j": j}
+                    best = {"score": score, "i": i, "j": j, "orient": orient}
                     best_name2 = name2
                     best_full2 = full2
                     best_per = per
@@ -5054,6 +5220,7 @@ def main(argv=None) -> int:
             best_score = best["score"]
             best_i = best["i"]
             best_j = best["j"]
+            best_orient = best.get("orient", _ORIENTATION_FORWARD)
             _best_per = best_per
 
             orig_s1 = s1
@@ -5065,7 +5232,7 @@ def main(argv=None) -> int:
 
         else:
             # Original behavior: seq2 provided directly (single sequence)
-            best_score, best_i, best_j, _best_per = best_ungapped_window_pair(
+            best_score, best_i, best_j, _best_per, best_orient = best_ungapped_window_pair(
                 s1,
                 s2,
                 mj,
@@ -5074,6 +5241,8 @@ def main(argv=None) -> int:
                 max_evals=args.auto_align_max_evals,
                 unknown_policy=args.unknown,
                 context_bonus=args.context_bonus,
+                orientation=args.orientation,
+                return_orientation=True,
             )
             if best_score is None:
                 print(
@@ -5087,7 +5256,8 @@ def main(argv=None) -> int:
 
         # Slice the best windows
         s1 = orig_s1[best_i: best_i + args.auto_align_len]
-        s2 = orig_s2[best_j: best_j + args.auto_align_len]
+        s2_raw = orig_s2[best_j: best_j + args.auto_align_len]
+        s2 = s2_raw[::-1] if best_orient == "reverse" else s2_raw
 
         total_pairs = (len(orig_s1) - args.auto_align_len + 1) * \
             (len(orig_s2) - args.auto_align_len + 1)
@@ -5102,7 +5272,7 @@ def main(argv=None) -> int:
         )
         print(f"  best window score: {fmt_float(best_score, 2)}")
         print(f"  seq1 window: pos {best_i+1}-{best_i+args.auto_align_len}  {s1}")
-        print(f"  seq2 window: pos {best_j+1}-{best_j+args.auto_align_len}  {s2}")
+        print(f"  seq2 window: pos {best_j+1}-{best_j+args.auto_align_len} orient={best_orient}  {s2}")
 
         # Optional (but very useful) debug line:
         # if args.fasta2:

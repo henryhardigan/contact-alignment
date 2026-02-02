@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, json, math, os
+import argparse, json, math, os, tempfile
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
@@ -8,7 +8,7 @@ from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
-from Bio.PDB import PDBParser, is_aa
+from Bio.PDB import PDBParser, MMCIFParser, PDBIO, is_aa
 
 # --- Optional: AlphaFold pLDDT handling ---
 def extract_plddt_from_bfactor(residue) -> float:
@@ -52,7 +52,20 @@ def compute_sasa_with_freesasa(pdb_path: str, chain: str):
     Returns dict keyed by (chain_id, resseq, icode) -> sasa
     """
     import freesasa
-    structure = freesasa.Structure(pdb_path)
+    tmp_path = None
+    path_for_freesasa = pdb_path
+    lower = pdb_path.lower()
+    if lower.endswith(".cif") or lower.endswith(".mmcif"):
+        # FreeSASA expects PDB format; convert mmCIF to a temp PDB.
+        parser = MMCIFParser(QUIET=True)
+        structure = parser.get_structure("prot", pdb_path)
+        with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as tmp:
+            tmp_path = tmp.name
+        io = PDBIO()
+        io.set_structure(structure)
+        io.save(tmp_path)
+        path_for_freesasa = tmp_path
+    structure = freesasa.Structure(path_for_freesasa)
     result = freesasa.calc(structure)
     # freesasa residue areas are accessible via result.residueAreas()
     ra = result.residueAreas()
@@ -71,11 +84,23 @@ def compute_sasa_with_freesasa(pdb_path: str, chain: str):
             except Exception:
                 continue
             sasa_map[(ch, resseq, "")] = float(areas.total)
+    if tmp_path:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
     return sasa_map
 
+def load_structure(path: str):
+    lower = path.lower()
+    if lower.endswith(".cif") or lower.endswith(".mmcif"):
+        parser = MMCIFParser(QUIET=True)
+    else:
+        parser = PDBParser(QUIET=True)
+    return parser.get_structure("prot", path)
+
 def build_residue_table(pdb_path: str, chain_id: str):
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("prot", pdb_path)
+    structure = load_structure(pdb_path)
     model = next(structure.get_models())
     if chain_id:
         if chain_id not in model:
@@ -110,6 +135,15 @@ def build_residue_table(pdb_path: str, chain_id: str):
         rsa = float("nan")
         if not math.isnan(sasa) and aa in MAX_SASA:
             rsa = min(1.0, max(0.0, sasa / MAX_SASA[aa]))
+        # RSA weight for downstream scoring: >0.05 -> 1.0, (0,0.05) -> 0.5, 0 -> 0.25
+        if math.isnan(rsa):
+            rsa_wt = 1.0
+        elif rsa == 0.0:
+            rsa_wt = 0.25
+        elif rsa < 0.05:
+            rsa_wt = 0.5
+        else:
+            rsa_wt = 1.0
 
         sc_x = float(sc[0]) if sc is not None else float("nan")
         sc_y = float(sc[1]) if sc is not None else float("nan")
@@ -121,7 +155,7 @@ def build_residue_table(pdb_path: str, chain_id: str):
             aa=aa,
             ca_x=float(ca[0]), ca_y=float(ca[1]), ca_z=float(ca[2]),
             sc_x=sc_x, sc_y=sc_y, sc_z=sc_z,
-            sasa=sasa, rsa=rsa, pLDDT=plddt
+            sasa=sasa, rsa=rsa, rsa_wt=rsa_wt, pLDDT=plddt
         ))
     df = pd.DataFrame(rows)
     df.insert(0, "res_id", np.arange(len(df), dtype=int))
@@ -129,11 +163,10 @@ def build_residue_table(pdb_path: str, chain_id: str):
 
 def build_surface_graph(df: pd.DataFrame, rsa_thr: float, dcut: float, sigma: float):
     df = df.copy()
-    df["is_surface"] = (df["rsa"].fillna(0.0) > rsa_thr)
+    # Include all residues; RSA is computed but not used to filter at this stage.
+    df["is_surface"] = True
 
-    surf = df[df["is_surface"]].copy()
-    if surf.empty:
-        raise RuntimeError("No surface residues found; lower rsa_thr or check SASA computation.")
+    surf = df.copy()
 
     coords = surf[["sc_x","sc_y","sc_z"]].to_numpy()
     # Handle any NaNs (should be rare). Fallback to CA coords if needed.
@@ -271,9 +304,18 @@ def surface_walk(G: nx.Graph, df: pd.DataFrame, component_id: int, use_2d=None):
         path.append(nxt)
         cur = nxt
 
-    aas = df.set_index("res_id").loc[path, "aa"].astype(str).tolist()
+    path_df = df.set_index("res_id").loc[path]
+    aas = path_df["aa"].astype(str).tolist()
+    weights = path_df["rsa_wt"].astype(float).tolist()
     surface_string = "".join(aas)
-    return {"component": component_id, "start": start, "path": path, "jumps": jumps, "surface_string": surface_string}
+    return {
+        "component": component_id,
+        "start": start,
+        "path": path,
+        "jumps": jumps,
+        "surface_string": surface_string,
+        "rsa_weights": weights,
+    }
 
 def main():
     ap = argparse.ArgumentParser()

@@ -22,6 +22,21 @@ from .amino_acid_properties import AA20, AA20_STR, apply_mj_overrides, has_charg
 from .clustering import _kmer_hits, clustal_pair_score
 from .scoring import context_bonus_aligned, get_mj_scorer
 
+_ORIENTATION_FORWARD = "forward"
+_ORIENTATION_REVERSE = "reverse"
+_ORIENTATION_BOTH = "both"
+
+
+def _normalize_orientation(orientation: str) -> str:
+    o = orientation.lower()
+    if o not in (_ORIENTATION_FORWARD, _ORIENTATION_REVERSE, _ORIENTATION_BOTH):
+        raise ValueError(f"Unknown orientation {orientation!r}; use 'forward', 'reverse', or 'both'")
+    return o
+
+
+def _reverse_start_index(n2: int, window: int, j_rev: int) -> int:
+    return n2 - j_rev - window
+
 
 def overlaps_fraction(a_start: int, a_end: int, b_start: int, b_end: int) -> float:
     """Compute overlap fraction between two intervals.
@@ -62,7 +77,9 @@ def best_ungapped_window_pair(
     rng_seed: int = 1,
     unknown_policy: str = "error",
     context_bonus: bool = False,
-) -> tuple[Optional[float], Optional[int], Optional[int], Optional[list[float]]]:
+    orientation: str = "both",
+    return_orientation: bool = False,
+) -> tuple:
     """Find the best ungapped window pair using MJ scoring.
 
     Scans all (or sampled) window pairs and returns the one with the
@@ -78,6 +95,8 @@ def best_ungapped_window_pair(
         rng_seed: Random seed for sampling.
         unknown_policy: How to handle unknown residues.
         context_bonus: Whether to apply context bonuses.
+        orientation: 'forward', 'reverse', or 'both' (seq2 orientation).
+        return_orientation: If True, append orientation label to return tuple.
 
     Returns:
         Tuple of (score, start_i, start_j, per_pos_scores) where:
@@ -85,11 +104,13 @@ def best_ungapped_window_pair(
             - start_j: 0-based start in seq2
             - per_pos_scores: List of scores for each window position
         Returns (None, None, None, None) if no valid windows.
+        If return_orientation is True, appends orientation ('forward'/'reverse').
 
     Example:
         >>> score, i, j, per_pos = best_ungapped_window_pair(seq1, seq2, mj, 10)
         >>> print(f"Best window at ({i}, {j}) with score {score}")
     """
+    orientation = _normalize_orientation(orientation)
     if window <= 0:
         return None, None, None, None
     n1 = len(seq1)
@@ -97,73 +118,37 @@ def best_ungapped_window_pair(
     if n1 < window or n2 < window:
         return None, None, None, None
 
-    total_pairs = (n1 - window + 1) * (n2 - window + 1)
-    use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
+    def run(seq2_local: str) -> tuple[Optional[float], Optional[int], Optional[int], Optional[list[float]]]:
+        total_pairs = (n1 - window + 1) * (len(seq2_local) - window + 1)
+        use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
 
-    mj_score = get_mj_scorer(mj)
-    s1 = seq1
-    s2 = seq2
-    w = window
+        mj_score = get_mj_scorer(mj)
+        s1 = seq1
+        s2 = seq2_local
+        w = window
 
-    # Initialize best tracking
-    if mode == "min":
-        best = float("inf")
-        def better(x: float, y: float) -> bool:
-            return x < y
-    else:
-        best = float("-inf")
-        def better(x: float, y: float) -> bool:
-            return x > y
+        if mode == "min":
+            best = float("inf")
+            def better(x: float, y: float) -> bool:
+                return x < y
+        else:
+            best = float("-inf")
+            def better(x: float, y: float) -> bool:
+                return x > y
 
-    best_i: Optional[int] = None
-    best_j: Optional[int] = None
-    best_per: Optional[list[float]] = None
-    use_context = context_bonus
+        best_i: Optional[int] = None
+        best_j: Optional[int] = None
+        best_per: Optional[list[float]] = None
+        use_context = context_bonus
 
-    if use_sampling:
-        # Random sampling
-        rng = random.Random(rng_seed)
-        for _ in range(max_evals):
-            i = rng.randrange(0, n1 - w + 1)
-            j = rng.randrange(0, n2 - w + 1)
-            per: list[float] = []
-            s = 0.0
-            valid = True
-            for k in range(w):
-                try:
-                    v = mj_score(s1[i + k], s2[j + k])
-                except KeyError:
-                    if unknown_policy == "error":
-                        raise
-                    if unknown_policy == "skip":
-                        valid = False
-                        break
-                    v = 0.0
-                per.append(v)  # type: ignore
-                s += v  # type: ignore
-            if not valid:
-                continue
-            if use_context:
-                s += sum(
-                    context_bonus_aligned(
-                        s1[i : i + w],
-                        s2[j : j + w],
-                        mj,
-                        unknown_policy=unknown_policy,
-                    )
-                )
-            if better(s, best):
-                best = s
-                best_i = i
-                best_j = j
-                best_per = per
-    else:
-        # Exhaustive search
-        for i in range(0, n1 - w + 1):
-            for j in range(0, n2 - w + 1):
-                per = []
+        if use_sampling:
+            rng = random.Random(rng_seed)
+            for _ in range(max_evals):
+                i = rng.randrange(0, n1 - w + 1)
+                j = rng.randrange(0, len(s2) - w + 1)
+                per: list[float] = []
                 s = 0.0
-                invalid = False
+                valid = True
                 for k in range(w):
                     try:
                         v = mj_score(s1[i + k], s2[j + k])
@@ -171,12 +156,12 @@ def best_ungapped_window_pair(
                         if unknown_policy == "error":
                             raise
                         if unknown_policy == "skip":
-                            invalid = True
+                            valid = False
                             break
                         v = 0.0
                     per.append(v)  # type: ignore
                     s += v  # type: ignore
-                if invalid:
+                if not valid:
                     continue
                 if use_context:
                     s += sum(
@@ -192,8 +177,74 @@ def best_ungapped_window_pair(
                     best_i = i
                     best_j = j
                     best_per = per
+        else:
+            for i in range(0, n1 - w + 1):
+                for j in range(0, len(s2) - w + 1):
+                    per = []
+                    s = 0.0
+                    invalid = False
+                    for k in range(w):
+                        try:
+                            v = mj_score(s1[i + k], s2[j + k])
+                        except KeyError:
+                            if unknown_policy == "error":
+                                raise
+                            if unknown_policy == "skip":
+                                invalid = True
+                                break
+                            v = 0.0
+                        per.append(v)  # type: ignore
+                        s += v  # type: ignore
+                    if invalid:
+                        continue
+                    if use_context:
+                        s += sum(
+                            context_bonus_aligned(
+                                s1[i : i + w],
+                                s2[j : j + w],
+                                mj,
+                                unknown_policy=unknown_policy,
+                            )
+                        )
+                    if better(s, best):
+                        best = s
+                        best_i = i
+                        best_j = j
+                        best_per = per
 
-    return best, best_i, best_j, best_per
+        return best, best_i, best_j, best_per
+
+    def pack(
+        score: Optional[float],
+        i: Optional[int],
+        j: Optional[int],
+        per: Optional[list[float]],
+        orient: str,
+    ) -> tuple:
+        if return_orientation:
+            return score, i, j, per, orient
+        return score, i, j, per
+
+    best_f = run(seq2)
+    if orientation == _ORIENTATION_FORWARD:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    best_r = run(seq2[::-1])
+    if best_r[2] is not None:
+        best_r = (best_r[0], best_r[1], _reverse_start_index(n2, window, best_r[2]), best_r[3])
+
+    if orientation == _ORIENTATION_REVERSE:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+
+    if best_f[0] is None:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    if best_r[0] is None:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    take_rev = best_r[0] < best_f[0] if mode == "min" else best_r[0] > best_f[0]
+    if take_rev:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
 
 
 def best_ungapped_window_pair_clustal(
@@ -211,7 +262,9 @@ def best_ungapped_window_pair_clustal(
     require_positions2: Optional[list[tuple[int, set[str]]]] = None,
     rank_by: str = "score",
     filter_charge_runs: bool = False,
-) -> tuple[Optional[float], Optional[int], Optional[int], Optional[int]]:
+    orientation: str = "both",
+    return_orientation: bool = False,
+) -> tuple:
     """Find best ungapped window pair using Clustal similarity scoring.
 
     Args:
@@ -228,10 +281,13 @@ def best_ungapped_window_pair_clustal(
         require_positions2: Position constraints as (offset, allowed_set) tuples.
         rank_by: 'score' or 'identity' for ranking windows.
         filter_charge_runs: Skip windows containing charge runs.
+        orientation: 'forward', 'reverse', or 'both' (seq2 orientation).
+        return_orientation: If True, append orientation label to return tuple.
 
     Returns:
         Tuple of (score, start_i, start_j, identity_count).
     """
+    orientation = _normalize_orientation(orientation)
     if window <= 0:
         return None, None, None, None
     n1 = len(seq1)
@@ -239,116 +295,136 @@ def best_ungapped_window_pair_clustal(
     if n1 < window or n2 < window:
         return None, None, None, None
 
-    # K-mer prefiltering
-    prefix: Optional[list[int]] = None
-    if kmer_len and kmer_len > 0 and kmer_len <= window:
-        seq1_kmers: set[str] = set()
-        for i in range(0, n1 - kmer_len + 1):
-            kmer = seq1[i : i + kmer_len]
-            if any(c not in AA20 for c in kmer):
-                if unknown_policy == "error":
-                    raise ValueError("Unknown residue in Clustal k-mer scan")
-                continue
-            seq1_kmers.add(kmer)
-        if not seq1_kmers:
-            return None, None, None, None
-        hits = _kmer_hits(seq2, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
-        if not hits:
-            return None, None, None, None
-        prefix = [0]
-        for h in hits:
-            prefix.append(prefix[-1] + (1 if h else 0))
+    def rank_key(score: float, ident: int) -> tuple:
+        if rank_by == "identity":
+            return (ident, score)
+        return (score,)
 
-    total_pairs = (n1 - window + 1) * (n2 - window + 1)
-    use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
+    def run(seq2_local: str) -> tuple[Optional[float], Optional[int], Optional[int], Optional[int]]:
+        prefix: Optional[list[int]] = None
+        if kmer_len and kmer_len > 0 and kmer_len <= window:
+            seq1_kmers: set[str] = set()
+            for i in range(0, n1 - kmer_len + 1):
+                kmer = seq1[i : i + kmer_len]
+                if any(c not in AA20 for c in kmer):
+                    if unknown_policy == "error":
+                        raise ValueError("Unknown residue in Clustal k-mer scan")
+                    continue
+                seq1_kmers.add(kmer)
+            if not seq1_kmers:
+                return None, None, None, None
+            hits = _kmer_hits(seq2_local, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
+            if not hits:
+                return None, None, None, None
+            prefix = [0]
+            for h in hits:
+                prefix.append(prefix[-1] + (1 if h else 0))
 
-    best = float("-inf")
-    best_ident: Optional[int] = None
-    best_i: Optional[int] = None
-    best_j: Optional[int] = None
+        total_pairs = (n1 - window + 1) * (len(seq2_local) - window + 1)
+        use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
 
-    def evaluate_window(i: int, j: int) -> Optional[tuple[float, int]]:
-        """Evaluate a single window pair."""
-        # Check position constraints
-        if require_positions2:
-            if any(seq2[j + off] not in allowed for off, allowed in require_positions2):
-                return None
-        # Check k-mer filter
-        if prefix is not None:
-            end = j + (window - kmer_len + 1)
-            if end > len(prefix) - 1:
-                return None
-            if prefix[end] - prefix[j] < kmer_min:
-                return None
-        # Check charge runs
-        if filter_charge_runs:
-            win1 = seq1[i : i + window]
-            win2 = seq2[j : j + window]
-            if has_charge_run(win1) or has_charge_run(win2):
-                return None
+        best = float("-inf")
+        best_ident: Optional[int] = None
+        best_i: Optional[int] = None
+        best_j: Optional[int] = None
 
-        # Score the window
-        s = 0.0
-        strong = 0
-        ident = 0
-        for k in range(window):
-            a = seq1[i + k]
-            b = seq2[j + k]
-            v = clustal_pair_score(a, b)
-            if v is None:
-                if unknown_policy == "error":
-                    raise ValueError("Unknown residue in Clustal scan")
-                if unknown_policy == "skip":
+        def evaluate_window(i: int, j: int) -> Optional[tuple[float, int]]:
+            if require_positions2:
+                if any(seq2_local[j + off] not in allowed for off, allowed in require_positions2):
                     return None
-                v = 0.0
-            if a == b and a in AA20:
-                ident += 1
-            if v >= 0.5:
-                strong += 1
-            s += v
+            if prefix is not None:
+                end = j + (window - kmer_len + 1)
+                if end > len(prefix) - 1:
+                    return None
+                if prefix[end] - prefix[j] < kmer_min:
+                    return None
+            if filter_charge_runs:
+                win1 = seq1[i : i + window]
+                win2 = seq2_local[j : j + window]
+                if has_charge_run(win1) or has_charge_run(win2):
+                    return None
 
-        # Apply prefilters
-        if prefilter_min_strong and strong < prefilter_min_strong:
-            return None
-        if prefilter_min_identity and ident < prefilter_min_identity:
-            return None
+            s = 0.0
+            strong = 0
+            ident = 0
+            for k in range(window):
+                a = seq1[i + k]
+                b = seq2_local[j + k]
+                v = clustal_pair_score(a, b)
+                if v is None:
+                    if unknown_policy == "error":
+                        raise ValueError("Unknown residue in Clustal scan")
+                    if unknown_policy == "skip":
+                        return None
+                    v = 0.0
+                if a == b and a in AA20:
+                    ident += 1
+                if v >= 0.5:
+                    strong += 1
+                s += v
 
-        return s, ident
+            if prefilter_min_strong and strong < prefilter_min_strong:
+                return None
+            if prefilter_min_identity and ident < prefilter_min_identity:
+                return None
 
-    if use_sampling:
-        rng = random.Random(rng_seed)
-        for _ in range(max_evals):
-            i = rng.randrange(0, n1 - window + 1)
-            j = rng.randrange(0, n2 - window + 1)
-            result = evaluate_window(i, j)
-            if result is None:
-                continue
-            s, ident = result
-            if rank_by == "identity":
-                if best_ident is None or ident > best_ident or (ident == best_ident and s > best):
-                    best, best_ident, best_i, best_j = s, ident, i, j
-            else:
-                if s > best:
-                    best, best_ident, best_i, best_j = s, ident, i, j
-    else:
-        for i in range(0, n1 - window + 1):
-            for j in range(0, n2 - window + 1):
+            return s, ident
+
+        if use_sampling:
+            rng = random.Random(rng_seed)
+            for _ in range(max_evals):
+                i = rng.randrange(0, n1 - window + 1)
+                j = rng.randrange(0, len(seq2_local) - window + 1)
                 result = evaluate_window(i, j)
                 if result is None:
                     continue
                 s, ident = result
-                if rank_by == "identity":
-                    is_better = (best_ident is None or ident > best_ident
-                                 or (ident == best_ident and s > best))
-                    if is_better:
-                        best, best_ident, best_i, best_j = s, ident, i, j
-                else:
-                    if s > best:
+                if rank_key(s, ident) > rank_key(best, best_ident or 0):
+                    best, best_ident, best_i, best_j = s, ident, i, j
+        else:
+            for i in range(0, n1 - window + 1):
+                for j in range(0, len(seq2_local) - window + 1):
+                    result = evaluate_window(i, j)
+                    if result is None:
+                        continue
+                    s, ident = result
+                    if rank_key(s, ident) > rank_key(best, best_ident or 0):
                         best, best_ident, best_i, best_j = s, ident, i, j
 
-    if best_i is None or best_j is None:
-        return None, None, None, None
-    return best, best_i, best_j, best_ident
+        if best_i is None or best_j is None:
+            return None, None, None, None
+        return best, best_i, best_j, best_ident
+
+    def pack(
+        score: Optional[float],
+        i: Optional[int],
+        j: Optional[int],
+        ident: Optional[int],
+        orient: str,
+    ) -> tuple:
+        if return_orientation:
+            return score, i, j, ident, orient
+        return score, i, j, ident
+
+    best_f = run(seq2)
+    if orientation == _ORIENTATION_FORWARD:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    best_r = run(seq2[::-1])
+    if best_r[2] is not None:
+        best_r = (best_r[0], best_r[1], _reverse_start_index(n2, window, best_r[2]), best_r[3])
+
+    if orientation == _ORIENTATION_REVERSE:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+
+    if best_f[0] is None:
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    if best_r[0] is None:
+        return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
+
+    if rank_key(best_r[0], best_r[3] or 0) > rank_key(best_f[0], best_f[3] or 0):
+        return pack(best_r[0], best_r[1], best_r[2], best_r[3], _ORIENTATION_REVERSE)
+    return pack(best_f[0], best_f[1], best_f[2], best_f[3], _ORIENTATION_FORWARD)
 
 
 def best_ungapped_window_pair_clustal_topk(
@@ -367,7 +443,9 @@ def best_ungapped_window_pair_clustal_topk(
     rank_by: str = "identity",
     topk: int = 3,
     filter_charge_runs: bool = False,
-) -> list[tuple[float, int, int, int]]:
+    orientation: str = "both",
+    include_orientation: bool = False,
+) -> list[tuple]:
     """Find top-K best ungapped windows using Clustal scoring.
 
     Similar to best_ungapped_window_pair_clustal but returns multiple
@@ -388,11 +466,15 @@ def best_ungapped_window_pair_clustal_topk(
         rank_by: 'identity' or 'score' for ranking.
         topk: Number of top windows to return.
         filter_charge_runs: Skip windows with charge runs.
+        orientation: 'forward', 'reverse', or 'both' (seq2 orientation).
+        include_orientation: If True, append orientation label to tuples.
 
     Returns:
         List of (score, identity_count, start_i, start_j) tuples,
         sorted by ranking criterion (best first).
+        If include_orientation is True, tuples include orientation at end.
     """
+    orientation = _normalize_orientation(orientation)
     if window <= 0:
         return []
     n1 = len(seq1)
@@ -400,106 +482,134 @@ def best_ungapped_window_pair_clustal_topk(
     if n1 < window or n2 < window:
         return []
 
-    # K-mer prefiltering
-    prefix: Optional[list[int]] = None
-    if kmer_len and kmer_len > 0 and kmer_len <= window:
-        seq1_kmers: set[str] = set()
-        for i in range(0, n1 - kmer_len + 1):
-            kmer = seq1[i : i + kmer_len]
-            if any(c not in AA20 for c in kmer):
-                if unknown_policy == "error":
-                    raise ValueError("Unknown residue in Clustal k-mer scan")
-                continue
-            seq1_kmers.add(kmer)
-        if not seq1_kmers:
-            return []
-        hits = _kmer_hits(seq2, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
-        if not hits:
-            return []
-        prefix = [0]
-        for h in hits:
-            prefix.append(prefix[-1] + (1 if h else 0))
+    def run(seq2_local: str) -> list[tuple[float, int, int, int]]:
+        prefix: Optional[list[int]] = None
+        if kmer_len and kmer_len > 0 and kmer_len <= window:
+            seq1_kmers: set[str] = set()
+            for i in range(0, n1 - kmer_len + 1):
+                kmer = seq1[i : i + kmer_len]
+                if any(c not in AA20 for c in kmer):
+                    if unknown_policy == "error":
+                        raise ValueError("Unknown residue in Clustal k-mer scan")
+                    continue
+                seq1_kmers.add(kmer)
+            if not seq1_kmers:
+                return []
+            hits = _kmer_hits(seq2_local, kmer_len, seq1_kmers, unknown_policy=unknown_policy)
+            if not hits:
+                return []
+            prefix = [0]
+            for h in hits:
+                prefix.append(prefix[-1] + (1 if h else 0))
 
-    total_pairs = (n1 - window + 1) * (n2 - window + 1)
-    use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
-    rng = random.Random(rng_seed)
+        total_pairs = (n1 - window + 1) * (len(seq2_local) - window + 1)
+        use_sampling = max_evals and max_evals > 0 and total_pairs > max_evals
+        rng = random.Random(rng_seed)
 
-    # Min-heap for top-K tracking
-    heap: list[tuple[tuple[int, float], float, int, int, int]] = []
+        heap: list[tuple[tuple[int, float], float, int, int, int]] = []
 
-    def push_hit(score: float, ident: int, i: int, j: int) -> None:
-        """Push a window to the top-K heap."""
-        key = (ident, score) if rank_by == "identity" else (int(score * 1000), score)
-        item = (key, score, ident, i, j)
-        if len(heap) < topk:
-            heapq.heappush(heap, item)
-        else:
-            if key > heap[0][0]:
-                heapq.heapreplace(heap, item)
+        def push_hit(score: float, ident: int, i: int, j: int) -> None:
+            key = (ident, score) if rank_by == "identity" else (int(score * 1000), score)
+            item = (key, score, ident, i, j)
+            if len(heap) < topk:
+                heapq.heappush(heap, item)
+            else:
+                if key > heap[0][0]:
+                    heapq.heapreplace(heap, item)
 
-    def evaluate_window(i: int, j: int) -> Optional[tuple[float, int]]:
-        """Evaluate a single window pair."""
-        if require_positions2:
-            if any(seq2[j + off] not in allowed for off, allowed in require_positions2):
-                return None
-        if prefix is not None:
-            end = j + (window - kmer_len + 1)
-            if end > len(prefix) - 1:
-                return None
-            if prefix[end] - prefix[j] < kmer_min:
-                return None
-        if filter_charge_runs:
-            win1 = seq1[i : i + window]
-            win2 = seq2[j : j + window]
-            if has_charge_run(win1) or has_charge_run(win2):
-                return None
-
-        s = 0.0
-        strong = 0
-        ident = 0
-        for k in range(window):
-            a = seq1[i + k]
-            b = seq2[j + k]
-            v = clustal_pair_score(a, b)
-            if v is None:
-                if unknown_policy == "error":
-                    raise ValueError("Unknown residue in Clustal scan")
-                if unknown_policy == "skip":
+        def evaluate_window(i: int, j: int) -> Optional[tuple[float, int]]:
+            if require_positions2:
+                if any(seq2_local[j + off] not in allowed for off, allowed in require_positions2):
                     return None
-                v = 0.0
-            if a == b and a in AA20:
-                ident += 1
-            if v >= 0.5:
-                strong += 1
-            s += v
+            if prefix is not None:
+                end = j + (window - kmer_len + 1)
+                if end > len(prefix) - 1:
+                    return None
+                if prefix[end] - prefix[j] < kmer_min:
+                    return None
+            if filter_charge_runs:
+                win1 = seq1[i : i + window]
+                win2 = seq2_local[j : j + window]
+                if has_charge_run(win1) or has_charge_run(win2):
+                    return None
 
-        if prefilter_min_strong and strong < prefilter_min_strong:
-            return None
-        if prefilter_min_identity and ident < prefilter_min_identity:
-            return None
+            s = 0.0
+            strong = 0
+            ident = 0
+            for k in range(window):
+                a = seq1[i + k]
+                b = seq2_local[j + k]
+                v = clustal_pair_score(a, b)
+                if v is None:
+                    if unknown_policy == "error":
+                        raise ValueError("Unknown residue in Clustal scan")
+                    if unknown_policy == "skip":
+                        return None
+                    v = 0.0
+                if a == b and a in AA20:
+                    ident += 1
+                if v >= 0.5:
+                    strong += 1
+                s += v
 
-        return s, ident
+            if prefilter_min_strong and strong < prefilter_min_strong:
+                return None
+            if prefilter_min_identity and ident < prefilter_min_identity:
+                return None
 
-    if use_sampling:
-        for _ in range(max_evals):
-            i = rng.randrange(0, n1 - window + 1)
-            j = rng.randrange(0, n2 - window + 1)
-            result = evaluate_window(i, j)
-            if result:
-                push_hit(result[0], result[1], i, j)
-    else:
-        for i in range(0, n1 - window + 1):
-            for j in range(0, n2 - window + 1):
+            return s, ident
+
+        if use_sampling:
+            for _ in range(max_evals):
+                i = rng.randrange(0, n1 - window + 1)
+                j = rng.randrange(0, len(seq2_local) - window + 1)
                 result = evaluate_window(i, j)
                 if result:
                     push_hit(result[0], result[1], i, j)
+        else:
+            for i in range(0, n1 - window + 1):
+                for j in range(0, len(seq2_local) - window + 1):
+                    result = evaluate_window(i, j)
+                    if result:
+                        push_hit(result[0], result[1], i, j)
 
-    # Sort by ranking criterion (best first)
-    results = sorted(heap, key=lambda x: x[0], reverse=True)
-    return [(score, ident, i, j) for _key, score, ident, i, j in results]
+        results = sorted(heap, key=lambda x: x[0], reverse=True)
+        return [(score, ident, i, j) for _key, score, ident, i, j in results]
+
+    def rank_key(score: float, ident: int) -> tuple:
+        return (ident, score) if rank_by == "identity" else (int(score * 1000), score)
+
+    def with_orientation(
+        hits: list[tuple[float, int, int, int]],
+        orient: str,
+    ) -> list[tuple]:
+        if include_orientation:
+            return [(score, ident, i, j, orient) for score, ident, i, j in hits]
+        return hits  # type: ignore[return-value]
+
+    hits_f = run(seq2)
+    if orientation == _ORIENTATION_FORWARD:
+        return with_orientation(hits_f, _ORIENTATION_FORWARD)
+
+    hits_r = run(seq2[::-1])
+    hits_r = [
+        (score, ident, i, _reverse_start_index(n2, window, j)) for score, ident, i, j in hits_r
+    ]
+    if orientation == _ORIENTATION_REVERSE:
+        return with_orientation(hits_r, _ORIENTATION_REVERSE)
+
+    merged_tagged = (
+        [(score, ident, i, j, _ORIENTATION_FORWARD) for score, ident, i, j in hits_f]
+        + [(score, ident, i, j, _ORIENTATION_REVERSE) for score, ident, i, j in hits_r]
+    )
+    merged_tagged.sort(key=lambda x: rank_key(x[0], x[1]), reverse=True)
+    merged_tagged = merged_tagged[:topk]
+    if include_orientation:
+        return merged_tagged  # type: ignore[return-value]
+    return [(score, ident, i, j) for score, ident, i, j, _orient in merged_tagged]
 
 
-def seed_windows(
+def _seed_windows_single(
     seq1: str,
     seq2: str,
     mj: dict[tuple[str, str], float],
@@ -515,31 +625,6 @@ def seed_windows(
     unknown_policy: str = "error",
     context_bonus: bool = False,
 ) -> list[tuple[float, int, int]]:
-    """Generate filtered list of seed windows for alignment.
-
-    Scans for window pairs that pass the score threshold and returns
-    them sorted by score. Can use prefiltering with shorter windows
-    for efficiency.
-
-    Args:
-        seq1: First sequence.
-        seq2: Second sequence.
-        mj: MJ matrix dictionary.
-        window: Window length for final scoring.
-        score_max: Maximum score threshold (more negative = stricter).
-        kmax: Maximum number of seeds to return (0 = unlimited).
-        kmin: Minimum seeds to keep even if they don't pass threshold.
-        prefilter_len: Shorter window length for prefiltering (0 = disabled).
-        prefilter_score_max: Score threshold for prefiltering.
-        prefilter_kmax: Max candidates from prefilter.
-        prefilter_kmin: Min candidates from prefilter.
-        unknown_policy: How to handle unknown residues.
-        context_bonus: Whether to apply context bonuses.
-
-    Returns:
-        List of (score, start_i, start_j) tuples sorted by score
-        (most negative first).
-    """
     if window <= 0:
         return []
     n1 = len(seq1)
@@ -547,7 +632,6 @@ def seed_windows(
     if n1 < window or n2 < window:
         return []
 
-    # Try NumPy-accelerated version first
     hits_np = _seed_windows_numpy(
         seq1, seq2, mj,
         window=window,
@@ -564,7 +648,6 @@ def seed_windows(
     if hits_np is not None:
         return hits_np
 
-    # Fall back to pure Python
     mj_score = get_mj_scorer(mj)
 
     def score_window(i: int, j: int, win: int) -> Optional[float]:
@@ -640,7 +723,7 @@ def seed_windows(
     if not hits:
         return []
 
-    hits.sort(key=lambda x: x[0])  # Most negative first
+    hits.sort(key=lambda x: x[0])
     filtered = [h for h in hits if h[0] <= score_max]
 
     if len(filtered) < kmin:
@@ -649,6 +732,116 @@ def seed_windows(
         filtered = filtered[:kmax]
 
     return filtered
+
+
+def seed_windows(
+    seq1: str,
+    seq2: str,
+    mj: dict[tuple[str, str], float],
+    *,
+    window: int,
+    score_max: float,
+    kmax: int,
+    kmin: int,
+    prefilter_len: int = 0,
+    prefilter_score_max: Optional[float] = None,
+    prefilter_kmax: int = 0,
+    prefilter_kmin: int = 0,
+    unknown_policy: str = "error",
+    context_bonus: bool = False,
+    orientation: str = "both",
+    include_orientation: bool = False,
+) -> list[tuple]:
+    """Generate filtered list of seed windows for alignment.
+
+    Scans for window pairs that pass the score threshold and returns
+    them sorted by score. Can use prefiltering with shorter windows
+    for efficiency.
+
+    Args:
+        seq1: First sequence.
+        seq2: Second sequence.
+        mj: MJ matrix dictionary.
+        window: Window length for final scoring.
+        score_max: Maximum score threshold (more negative = stricter).
+        kmax: Maximum number of seeds to return (0 = unlimited).
+        kmin: Minimum seeds to keep even if they don't pass threshold.
+        prefilter_len: Shorter window length for prefiltering (0 = disabled).
+        prefilter_score_max: Score threshold for prefiltering.
+        prefilter_kmax: Max candidates from prefilter.
+        prefilter_kmin: Min candidates from prefilter.
+        unknown_policy: How to handle unknown residues.
+        context_bonus: Whether to apply context bonuses.
+        orientation: 'forward', 'reverse', or 'both' (seq2 orientation).
+        include_orientation: If True, append orientation label to tuples.
+
+    Returns:
+        List of (score, start_i, start_j) tuples sorted by score
+        (most negative first).
+        If include_orientation is True, tuples include orientation at end.
+    """
+    orientation = _normalize_orientation(orientation)
+    if window <= 0:
+        return []
+    n2 = len(seq2)
+    if len(seq1) < window or n2 < window:
+        return []
+
+    def with_orientation(
+        hits: list[tuple[float, int, int]],
+        orient: str,
+    ) -> list[tuple]:
+        if include_orientation:
+            return [(score, i, j, orient) for score, i, j in hits]
+        return hits  # type: ignore[return-value]
+
+    hits_f = _seed_windows_single(
+        seq1,
+        seq2,
+        mj,
+        window=window,
+        score_max=score_max,
+        kmax=kmax,
+        kmin=kmin,
+        prefilter_len=prefilter_len,
+        prefilter_score_max=prefilter_score_max,
+        prefilter_kmax=prefilter_kmax,
+        prefilter_kmin=prefilter_kmin,
+        unknown_policy=unknown_policy,
+        context_bonus=context_bonus,
+    )
+    if orientation == _ORIENTATION_FORWARD:
+        return with_orientation(hits_f, _ORIENTATION_FORWARD)
+
+    hits_r = _seed_windows_single(
+        seq1,
+        seq2[::-1],
+        mj,
+        window=window,
+        score_max=score_max,
+        kmax=kmax,
+        kmin=kmin,
+        prefilter_len=prefilter_len,
+        prefilter_score_max=prefilter_score_max,
+        prefilter_kmax=prefilter_kmax,
+        prefilter_kmin=prefilter_kmin,
+        unknown_policy=unknown_policy,
+        context_bonus=context_bonus,
+    )
+    hits_r = [(score, i, _reverse_start_index(n2, window, j)) for score, i, j in hits_r]
+    if orientation == _ORIENTATION_REVERSE:
+        return with_orientation(hits_r, _ORIENTATION_REVERSE)
+
+    merged_tagged = (
+        [(score, i, j, _ORIENTATION_FORWARD) for score, i, j in hits_f]
+        + [(score, i, j, _ORIENTATION_REVERSE) for score, i, j in hits_r]
+    )
+    merged_tagged.sort(key=lambda x: x[0])
+    if kmax and len(merged_tagged) > kmax:
+        merged_tagged = merged_tagged[:kmax]
+    if include_orientation:
+        return merged_tagged  # type: ignore[return-value]
+    return [(score, i, j) for score, i, j, _orient in merged_tagged]
 
 
 def _seed_windows_numpy(
@@ -869,6 +1062,7 @@ def seed_null_best_scores(
     unknown_policy: str = "error",
     seed: Optional[int] = None,
     context_bonus: bool = False,
+    orientation: str = "both",
 ) -> list[float]:
     """Generate null distribution for best window scores.
 
@@ -884,6 +1078,7 @@ def seed_null_best_scores(
         unknown_policy: How to handle unknown residues.
         seed: Random seed.
         context_bonus: Whether to apply context bonuses.
+        orientation: 'forward', 'reverse', or 'both' (seq2 orientation).
 
     Returns:
         List of best window scores from shuffled sequences.
@@ -902,6 +1097,7 @@ def seed_null_best_scores(
             mode="min",
             unknown_policy=unknown_policy,
             context_bonus=context_bonus,
+            orientation=orientation,
         )
         if score is not None:
             scores.append(float(score))
