@@ -6,6 +6,7 @@ import re
 import sys
 import time
 import threading
+import ssl
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -15,6 +16,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 FASTA_RE = re.compile(r"^>(\\S+)")
+SSL_CONTEXT = None
+
+
+def open_url(req, timeout=30):
+    if SSL_CONTEXT is not None:
+        return urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def parse_fasta_headers(path: Path):
@@ -41,7 +49,7 @@ def urlretrieve(url: str, dest: Path, timeout=30, verbose=False) -> bool:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         req = urllib.request.Request(url, headers={"User-Agent": "batch_surface_walk/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r, dest.open("wb") as w:
+        with open_url(req, timeout=timeout) as r, dest.open("wb") as w:
             w.write(r.read())
         return True
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
@@ -57,7 +65,7 @@ def fetch_alphafold(acc: str, cache_dir: Path, verbose=False):
     api_url = f"https://alphafold.ebi.ac.uk/api/prediction/{acc}"
     try:
         req = urllib.request.Request(api_url, headers={"User-Agent": "batch_surface_walk/1.0"})
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with open_url(req, timeout=30) as r:
             data = json.loads(r.read().decode("utf-8"))
         if isinstance(data, list) and data:
             entry = data[0]
@@ -129,7 +137,7 @@ def fetch_rcsb_pdb(acc: str, cache_dir: Path, verbose=False):
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with open_url(req, timeout=30) as r:
             data = json.loads(r.read().decode("utf-8"))
     except Exception as e:
         if verbose:
@@ -162,7 +170,7 @@ def fetch_uniprot_pdb(acc: str, cache_dir: Path, verbose=False):
     url = f"https://rest.uniprot.org/uniprotkb/{acc}.json"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "batch_surface_walk/1.0"})
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with open_url(req, timeout=30) as r:
             data = json.loads(r.read().decode("utf-8"))
     except Exception as e:
         if verbose:
@@ -218,7 +226,11 @@ def main():
     ap.add_argument("--sleep", type=float, default=0.2, help="Sleep between downloads")
     ap.add_argument("--verbose", action="store_true", help="Verbose download logging")
     ap.add_argument("--jobs", type=int, default=4, help="Parallel workers (default: 4)")
+    ap.add_argument("--insecure", action="store_true", help="Disable TLS certificate verification for downloads")
     args = ap.parse_args()
+    global SSL_CONTEXT
+    if args.insecure:
+        SSL_CONTEXT = ssl._create_unverified_context()
 
     fasta = Path(args.fasta)
     outdir = Path(args.outdir)

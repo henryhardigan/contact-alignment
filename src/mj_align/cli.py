@@ -16,6 +16,7 @@ For full options, see:
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Optional
 
 from .clustering import clustal_similarity
@@ -23,6 +24,14 @@ from .fasta_io import read_fasta_all, read_fasta_entry
 from .formatting import fmt_float, fmt_pct, fmt_prob
 from .scoring import anchors_by_threshold, load_mj_csv, score_aligned, top_contributors
 from .statistics import null_distribution, quantile
+
+
+def _default_mj_path() -> str:
+    root = Path(__file__).resolve().parents[2]
+    preferred = root / "refs" / "mj_matrix.csv"
+    if preferred.exists():
+        return str(preferred)
+    return str(root / "mj_matrix.csv")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -43,8 +52,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument(
         "--mj",
-        default="mj_matrix.csv",
-        help="Path to MJ matrix CSV (default: mj_matrix.csv)",
+        default=_default_mj_path(),
+        help="Path to MJ matrix CSV (default: refs/mj_matrix.csv)",
     )
     p.add_argument("--name1", default="seq1", help="Name for sequence 1")
     p.add_argument("--name2", default="seq2", help="Name for sequence 2")

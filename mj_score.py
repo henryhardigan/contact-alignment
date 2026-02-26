@@ -5,6 +5,7 @@ import sys
 import math
 import heapq
 import itertools
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 import unittest
 
@@ -3547,13 +3548,17 @@ class TestMJScore(unittest.TestCase):
 
 
 def main(argv=None) -> int:
+    root = Path(__file__).resolve().parent
+    preferred_mj = root / "refs" / "mj_matrix.csv"
+    default_mj = str(preferred_mj) if preferred_mj.exists() else "mj_matrix.csv"
+
     p = argparse.ArgumentParser(
         description="Score two aligned sequences using an MJ matrix (fixed register)."
     )
     p.add_argument(
         "--mj",
-        default="mj_matrix.csv",
-        help="Path to MJ matrix CSV (default: mj_matrix.csv)",
+        default=default_mj,
+        help="Path to MJ matrix CSV (default: refs/mj_matrix.csv)",
     )
 
     # Input methods: either direct strings, or FASTA files
