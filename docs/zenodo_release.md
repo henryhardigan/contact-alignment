@@ -21,7 +21,7 @@ The documented examples in [docs/db200k.md](/Users/henryhardigan/Desktop/src/lin
 ## Suggested Release Scope
 
 Good release content:
-- `idp_design/`
+- `contact_alignment/`
 - `scripts/` needed for DB200K scanning and reranking
 - `tests/`
 - `docs/`
