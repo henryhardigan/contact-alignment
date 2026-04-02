@@ -54,7 +54,7 @@ DB200K fragment PDBs and energy tables are **not** bundled. Download `DB200K.tar
 
 ```bash
 tar -xzf DB200K.tar.gz -C /path/to
-db_root=/Users/henryhardigan/Downloads/pisces-cache-scaac
+db_root=/path/to/pisces-cache-scaac
 python scripts/scan_db200k.py --db-root "$db_root" ...
 ```
 
