@@ -1,11 +1,10 @@
 cff-version: 1.2.0
-title: linear-complement-alignment
+title: contact-alignment
 message: If you use this repository, please cite the software using this metadata.
 type: software
 authors:
   - family-names: Hardigan
     given-names: Henry
-repository-code: https://github.com/henryhardigan/linear-complement-alignment
+repository-code: https://github.com/henryhardigan/contact-alignment
 license: MIT
 version: 0.1.0
-

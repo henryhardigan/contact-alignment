@@ -1,4 +1,4 @@
-# linear-complement-alignment
+# contact-alignment
 A method for assessing protein interaction potential by aligning short linear sequences for residue–residue complementarity.
 
 ## DB200K Workflow
@@ -18,12 +18,12 @@ The recommended starting point is:
 - `scripts/scan_db200k_accessibility.py` when exposed/flexible windows should be favored over buried rigid ones
 
 Worked examples, inputs, and output notes are documented in:
-- [docs/db200k.md](/Users/henryhardigan/Desktop/src/linear-complement-alignment/docs/db200k.md)
+- [docs/db200k.md](docs/db200k.md)
 
 Release-facing notes for packaging and citation:
-- [docs/zenodo_release.md](/Users/henryhardigan/Desktop/src/linear-complement-alignment/docs/zenodo_release.md)
-- [requirements-db200k.txt](/Users/henryhardigan/Desktop/src/linear-complement-alignment/requirements-db200k.txt)
-- [CITATION.cff](/Users/henryhardigan/Desktop/src/linear-complement-alignment/CITATION.cff)
+- [docs/zenodo_release.md](docs/zenodo_release.md)
+- [requirements-db200k.txt](requirements-db200k.txt)
+- [CITATION.cff](CITATION.cff)
 
 ## Running Pocket Queries
 
