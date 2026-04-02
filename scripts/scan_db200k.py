@@ -19,6 +19,11 @@ def get_parser():
     _db200k_cli.add_profile_args(parser)
     parser.add_argument("--fasta", type=str, default=None, help="Optional FASTA file to scan.")
     parser.add_argument("--top-k", type=int, default=25, help="Number of top FASTA hits to print.")
+    parser.add_argument(
+        "--show-breakdown",
+        action="store_true",
+        help="Print per-position energy breakdown for hits that include alignments.",
+    )
     _db200k_cli.add_threshold_arg(parser, required=False)
     _db200k_cli.add_alignment_args(parser)
     return parser
@@ -76,6 +81,9 @@ def main():
                 )
                 line += f"\tperiph={periph}"
         print(line)
+        if args.show_breakdown and "alignment" in hit:
+            for pos, res, energy in alignment.breakdown:
+                print(f"    q{pos}:{res}:{energy:.4f}")
 
 
 if __name__ == "__main__":
