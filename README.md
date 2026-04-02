@@ -25,15 +25,91 @@ Release-facing notes for packaging and citation:
 - [requirements-db200k.txt](requirements-db200k.txt)
 - [CITATION.cff](CITATION.cff)
 
-## Scope
-
-This repository is a DB200K-focused export intended for citation and archival:
-- packaged code lives under `contact_alignment/`
-- DB200K command-line entry points are in `scripts/`
-- examples and docs live under `examples/` and `docs/`
-- non-DB200K tooling has been removed to keep the release lightweight
-
 ## Key References
 
 - J. Holland and G. Grigoryan. *Structure-conditioned amino-acid couplings: How contact geometry affects pairwise sequence preferences.* Protein Science, 31(4), 2022. doi:10.1002/pro.4280.
 - R. Kurusu, Y. Fujimoto, H. Morishita, D. Noshiro, S. Takada, K. Yamano, H. Tanaka, R. Arai, S. Kageyama, T. Funakoshi, et al. *Integrated proteomics identifies p62-dependent selective autophagy of the supramolecular vault complex.* Developmental Cell, 58(13):1189–1205.e11, 2023. doi:10.1016/j.devcel.2023.04.015.
+
+## Running Pocket Queries
+
+This repo expects two inputs:
+- `ecoli_batch/` (structure/residue data)
+- `pulldown.tsv` (UniProt IDs)
+
+Default structure input is expected under `src/`:
+- `src/ecoli_batch/`
+
+No default pulldown file is versioned in the repo.
+Pass `--pulldown` explicitly to a TSV containing a `uniprot_id` column.
+
+### Quickstart
+Run from the repo root:
+```bash
+python3 src/pocket_pipeline/pocket_pipeline.py \
+  --ecoli-batch src/ecoli_batch \
+  --pulldown /path/to/pulldown.tsv \
+  --mode metrics
+```
+
+### Common Query Examples
+```bash
+# Metrics for a short motif
+python3 src/pocket_pipeline/pocket_pipeline.py \
+  --ecoli-batch src/ecoli_batch \
+  --pulldown /path/to/pulldown.tsv \
+  --pattern "H [RK] [LIV] [DE] Y" \
+  --mode metrics
+
+# Rank pulldown proteins by similarity
+python3 src/pocket_pipeline/pocket_pipeline.py \
+  --ecoli-batch src/ecoli_batch \
+  --pulldown /path/to/pulldown.tsv \
+  --pattern "H [RK] [LIVM] [DE] Y" \
+  --mode rank-pulldown
+
+# Variant search with subset expansion (default)
+python3 src/pocket_pipeline/pocket_pipeline.py \
+  --ecoli-batch src/ecoli_batch \
+  --pulldown /path/to/pulldown.tsv \
+  --pattern "H [RK] [LIVM] [DE] Y" \
+  --mode variant-search
+
+# Pocket search using greedy cluster-seed strategy
+python3 src/pocket_pipeline/pocket_pipeline.py \
+  --ecoli-batch src/ecoli_batch \
+  --pulldown /path/to/pulldown.tsv \
+  --mode pocket-search \
+  --cluster-seed \
+  --no-mj-norm
+
+# Fixed-register motif reuse search:
+# require at least 8 exact identities and 2 conservative substitutions in a 15 aa window
+# `--motif-len` can be omitted to use the full query length.
+python3 mj_score.py \
+  --seq1 MDRFLVAGQAAAALR \
+  --fasta2 /path/to/proteome.fasta \
+  --motif-search \
+  --motif-len 15 \
+  --motif-min-identity 8 \
+  --motif-min-conservative 2 \
+  --motif-rank total \
+  --motif-topk 10
+
+# Fast exhaustive motif reuse search over a proteome
+python3 scripts/fast_motif_search.py \
+  --seq1 VRLVGLHVTLLDPQMERQLVLGL \
+  --fasta2 /path/to/proteome.fasta \
+  --topk 10 \
+  --rank-by total
+
+# Grantham-distance fixed-window scan across Swiss-Prot chunks
+python3 scripts/grantham_window_scan.py \
+  --query AKGPDGMALP \
+  --fasta-glob 'sprot_chunks/*.fasta' \
+  --topk 20 \
+  --out tmp/akgpdgmalp_grantham_top20.tsv
+```
+
+### Notes
+- Outputs are TSVs written to the current working directory.
+- If you want to change inputs, pass `--ecoli-batch` and `--pulldown` explicitly.
