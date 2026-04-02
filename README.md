@@ -17,12 +17,12 @@ pip install -e .[db200k]
 Dependencies are listed in `requirements-db200k.txt` and the `db200k` extra in `pyproject.toml`.
 
 ## Quickstart (local example)
-Score the MVP shoulder-loop window (607-623) against the NBR1 UBA domain (913-957):
+Score the MVP shoulder-loop window (607-623) against the full NBR1 UBA span (913-966):
 ```bash
 python scripts/scan_db200k.py \
   --query-seq ETSEAKGPDGMALPRPR \
   --db-root /path/to/pisces-cache-scaac \
-  --fasta examples/db200k/nbr1_human_uba_913_957.fasta \
+  --fasta examples/db200k/nbr1_human_uba_913_966.fasta \
   --top-k 10
 ```
 More examples and options are in `docs/db200k.md`.
