@@ -7,7 +7,8 @@ FASTA when using the final combined score
 
     sequence_rank_score = db200k_score - seq_bonus
 
-The scoring path intentionally matches scripts/scan_db200k_accessibility.py.
+The scoring path intentionally matches the sequence-aware heuristic weighting
+used by scripts/scan_db200k_accessibility.py.
 """
 
 from __future__ import annotations

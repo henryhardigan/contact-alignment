@@ -4,9 +4,9 @@ Tools for scoring short linear sequence windows against DB200K contact-condition
 
 ## What's Included
 - Python package: `contact_alignment/` (DB200K profile loading and scanning utilities)
-- CLI scripts under `scripts/` for scanning, accessibility-aware reranking, reporting exact window ranks, and reciprocal rescoring
+- CLI scripts under `scripts/` for scanning, heuristic reranking, exact window ranks, chunked scans, and reciprocal rescoring
 - Documentation: `docs/db200k.md`, `docs/zenodo_release.md`
-- Minimal example inputs under `examples/db200k/` (NBR1 UBA domain FASTA, structure map, AlphaFold PDB)
+- Minimal example inputs under `examples/db200k/` and `examples/sprot_min/`
 - Citation metadata: `CITATION.cff`
 
 ## Install
@@ -29,9 +29,9 @@ More examples and options are in `docs/db200k.md`.
 
 ## Scripts at a Glance
 - `scan_db200k.py` — raw DB200K scan with alignment breakdowns
-- `scan_db200k_accessibility.py` — adds heuristic prefiltering, RSA/pLDDT rerank
+- `scan_db200k_accessibility.py` — adds heuristic prefiltering and sequence-aware reranking
 - `report_db200k_window_ranks.py` — report exact rank of specified target windows
-- `rerank_db200k_contact_weighted.py` / `rescore_db200k_reciprocal_3x3.py` — alternate scoring and reciprocal modes
+- `scan_db200k_chunks.py` / `rescore_db200k_reciprocal_3x3.py` — chunked scans and reciprocal rescoring
 
 ## Release Notes
 See `docs/zenodo_release.md` for the checklist used when tagging a Zenodo release (clean tree, docs verified, tests run).
@@ -43,7 +43,7 @@ See `docs/zenodo_release.md` for the checklist used when tagging a Zenodo releas
 To test against the full Swiss-Prot set, download directly from UniProt:
 ```bash
 # Reviewed (Swiss-Prot) only
-curl -L -o swissprot.fasta.gz \"https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&query=%28reviewed:true%29\"
+curl -L -o swissprot.fasta.gz "https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&query=%28reviewed:true%29"
 gunzip swissprot.fasta.gz
 ```
 Then point `--fasta` or `--fasta-glob` at the downloaded file.

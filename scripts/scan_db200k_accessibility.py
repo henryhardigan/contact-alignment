@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rank DB200K motif hits with sequence accessibility proxies and optional structure refinement.
+"""Rank DB200K motif hits with sequence accessibility proxies.
 
 This script is meant for cases where raw DB200K compatibility alone is not
 enough because buried, rigid windows can outrank exposed, flexible ones.
@@ -10,9 +10,6 @@ Workflow:
 3. For each hit, compute lightweight sequence-side proxies for:
    - accessibility / surface-likeness
    - flexibility / disorder-likeness
-4. Optionally refine shortlisted hits with real structure-derived mean RSA and
-   mean pLDDT when a matching structure is provided in `--structure-map`.
-
 The output keeps the raw DB200K score visible and reports every component
 separately, so weighting can be changed later without rerunning the scan.
 """
@@ -22,7 +19,6 @@ from __future__ import annotations
 import argparse
 import csv
 import heapq
-import importlib.util
 import math
 import sys
 from dataclasses import dataclass
@@ -40,16 +36,6 @@ try:
     import _db200k_cli  # noqa: E402
 except ModuleNotFoundError:  # pragma: no cover - repo layout fallback
     from examples import _db200k_cli  # type: ignore  # noqa: E402
-
-
-def _load_surface_walk():
-    module_path = REPO_ROOT / "src" / "surface_walk" / "surface_walk.py"
-    spec = importlib.util.spec_from_file_location("surface_walk_module", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load surface_walk module from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 SEQ_SURFACE_PROPENSITY = {
@@ -114,15 +100,6 @@ COARSE_CLASSES = {
 }
 
 
-@dataclass(frozen=True)
-class StructureEntry:
-    key: str
-    pdb_path: Path
-    chain: str
-    seq_start: int
-    resseq_start: int
-
-
 @dataclass
 class HitRecord:
     header: str
@@ -146,11 +123,6 @@ class HitRecord:
     seq_bonus: float
     sequence_rank_score: float
     breakdown: list[tuple[int, str, float]]
-    mean_rsa: float | None = None
-    mean_plddt: float | None = None
-    structure_bonus: float | None = None
-    structure_rank_score: float | None = None
-    structure_source: str | None = None
 
 
 @dataclass
@@ -430,30 +402,6 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated heuristic thresholds to count in report mode.",
     )
     parser.add_argument(
-        "--structure-map",
-        type=str,
-        default=None,
-        help="Optional TSV/CSV with columns key,pdb_path,chain,seq_start,resseq_start.",
-    )
-    parser.add_argument(
-        "--structure-top-k",
-        type=int,
-        default=15,
-        help="Number of sequence-ranked hits to refine with structures.",
-    )
-    parser.add_argument(
-        "--structure-rsa-weight",
-        type=float,
-        default=0.75,
-        help="Weight for structure-derived mean RSA.",
-    )
-    parser.add_argument(
-        "--structure-flex-weight",
-        type=float,
-        default=0.40,
-        help="Weight for structure-derived flexibility proxy (1 - mean pLDDT/100).",
-    )
-    parser.add_argument(
         "--out",
         type=str,
         default=None,
@@ -466,76 +414,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional progress print frequency.",
     )
     return parser.parse_args()
-
-
-def parse_structure_map(path: str | None) -> list[StructureEntry]:
-    if path is None:
-        return []
-    entries: list[StructureEntry] = []
-    with open(path, newline="") as handle:
-        sample = handle.read(2048)
-        handle.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
-            sep = dialect.delimiter
-        except csv.Error:
-            sep = "\t" if "\t" in sample else ","
-        reader = csv.DictReader(handle, delimiter=sep)
-        required = {"key", "pdb_path", "chain", "seq_start", "resseq_start"}
-        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
-            raise ValueError(
-                f"structure map must contain columns {sorted(required)}; got {reader.fieldnames}"
-            )
-        for row in reader:
-            entries.append(
-                StructureEntry(
-                    key=row["key"],
-                    pdb_path=Path(row["pdb_path"]).expanduser(),
-                    chain=row["chain"],
-                    seq_start=int(row["seq_start"]),
-                    resseq_start=int(row["resseq_start"]),
-                )
-            )
-    return entries
-
-
-def find_structure_entry(header: str, entries: list[StructureEntry]) -> StructureEntry | None:
-    for entry in entries:
-        if entry.key in header:
-            return entry
-    return None
-
-
-def compute_structure_bonus(
-    hit: HitRecord,
-    structure_entry: StructureEntry,
-    *,
-    surface_walk_module,
-    rsa_weight: float,
-    flex_weight: float,
-    cache: dict[tuple[str, str], object],
-) -> None:
-    cache_key = (str(structure_entry.pdb_path), structure_entry.chain)
-    if cache_key not in cache:
-        cache[cache_key] = surface_walk_module.build_residue_table(
-            str(structure_entry.pdb_path),
-            structure_entry.chain,
-        )
-    df = cache[cache_key]
-    hit_start = structure_entry.resseq_start + (hit.start - structure_entry.seq_start)
-    hit_end = structure_entry.resseq_start + (hit.end - structure_entry.seq_start)
-    sub = df[(df["resseq"] >= hit_start) & (df["resseq"] <= hit_end)]
-    if sub.empty or len(sub) != len(hit.window):
-        return
-    mean_rsa = float(sub["rsa"].mean())
-    mean_plddt = float(sub["pLDDT"].mean())
-    structure_bonus = rsa_weight * mean_rsa + flex_weight * (1.0 - (mean_plddt / 100.0))
-    hit.mean_rsa = mean_rsa
-    hit.mean_plddt = mean_plddt
-    hit.structure_bonus = structure_bonus
-    hit.structure_rank_score = hit.sequence_rank_score - structure_bonus
-    hit.structure_source = str(structure_entry.pdb_path)
-
 
 def iter_candidate_windows(
     args: argparse.Namespace,
@@ -772,10 +650,8 @@ def keep_top_k(hits: Iterable[HitRecord], top_k: int) -> list[HitRecord]:
 def write_hits(path: str, hits: list[HitRecord]) -> None:
     fields = [
         "sequence_rank_score",
-        "structure_rank_score",
         "db200k_score",
         "seq_bonus",
-        "structure_bonus",
         "seq_surface_proxy",
         "seq_flex_proxy",
         "seq_polar_fraction",
@@ -789,13 +665,10 @@ def write_hits(path: str, hits: list[HitRecord]) -> None:
         "seq_acidic_run_fraction",
         "seq_basic_run_fraction",
         "seq_charged_run_fraction",
-        "mean_rsa",
-        "mean_plddt",
         "header",
         "start",
         "end",
         "window",
-        "structure_source",
     ]
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
@@ -804,14 +677,8 @@ def write_hits(path: str, hits: list[HitRecord]) -> None:
             writer.writerow(
                 {
                     "sequence_rank_score": f"{hit.sequence_rank_score:.6f}",
-                    "structure_rank_score": ""
-                    if hit.structure_rank_score is None
-                    else f"{hit.structure_rank_score:.6f}",
                     "db200k_score": f"{hit.db200k_score:.6f}",
                     "seq_bonus": f"{hit.seq_bonus:.6f}",
-                    "structure_bonus": ""
-                    if hit.structure_bonus is None
-                    else f"{hit.structure_bonus:.6f}",
                     "seq_surface_proxy": f"{hit.seq_surface_proxy:.6f}",
                     "seq_flex_proxy": f"{hit.seq_flex_proxy:.6f}",
                     "seq_polar_fraction": f"{hit.seq_polar_fraction:.6f}",
@@ -825,13 +692,10 @@ def write_hits(path: str, hits: list[HitRecord]) -> None:
                     "seq_acidic_run_fraction": f"{hit.seq_acidic_run_fraction:.6f}",
                     "seq_basic_run_fraction": f"{hit.seq_basic_run_fraction:.6f}",
                     "seq_charged_run_fraction": f"{hit.seq_charged_run_fraction:.6f}",
-                    "mean_rsa": "" if hit.mean_rsa is None else f"{hit.mean_rsa:.6f}",
-                    "mean_plddt": "" if hit.mean_plddt is None else f"{hit.mean_plddt:.6f}",
                     "header": hit.header,
                     "start": hit.start,
                     "end": hit.end,
                     "window": hit.window,
-                    "structure_source": hit.structure_source or "",
                 }
             )
 
@@ -856,12 +720,6 @@ def print_hits(hits: list[HitRecord]) -> None:
             f"basicrun={hit.seq_basic_run_fraction:.3f}\t"
             f"chgrun={hit.seq_charged_run_fraction:.3f}"
         )
-        if hit.structure_rank_score is not None:
-            line += (
-                f"\tstruct_rank={hit.structure_rank_score:.4f}"
-                f"\trsa={hit.mean_rsa:.3f}"
-                f"\tplddt={hit.mean_plddt:.1f}"
-            )
         line += f"\t{hit.header}\t{hit.start}-{hit.end}\t{hit.window}"
         print(line)
 
@@ -873,28 +731,6 @@ def main() -> None:
         report_heuristic_counts(args, len(profiles))
         return
     hits = keep_top_k(iter_hits(args, profiles), args.top_k)
-
-    structure_entries = parse_structure_map(args.structure_map)
-    if structure_entries:
-        surface_walk_module = _load_surface_walk()
-        cache: dict[tuple[str, str], object] = {}
-        for hit in hits[: args.structure_top_k]:
-            structure_entry = find_structure_entry(hit.header, structure_entries)
-            if structure_entry is None:
-                continue
-            try:
-                compute_structure_bonus(
-                    hit,
-                    structure_entry,
-                    surface_walk_module=surface_walk_module,
-                    rsa_weight=args.structure_rsa_weight,
-                    flex_weight=args.structure_flex_weight,
-                    cache=cache,
-                )
-            except Exception:
-                continue
-        hits.sort(key=lambda hit: hit.structure_rank_score if hit.structure_rank_score is not None else hit.sequence_rank_score)
-
     print_hits(hits)
     if args.out:
         write_hits(args.out, hits)

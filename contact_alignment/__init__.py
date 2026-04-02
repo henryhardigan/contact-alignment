@@ -1,1 +1,1 @@
-"""Core functionality for optimizing probabilistic sequences in contact_alignment."""
+"""DB200K-backed contact alignment utilities."""

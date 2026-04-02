@@ -1,8 +1,2 @@
 # Minimal dependency set for the DB200K scanning workflow documented in docs/db200k.md
 numpy>=1.20
-pandas>=1.5
-scipy>=1.9
-biopython>=1.81
-networkx>=3.0
-freesasa>=2.2.1
-

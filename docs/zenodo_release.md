@@ -16,7 +16,7 @@ the working tree.
 The DB200K examples require an extracted DB200K root passed as `--db-root`.
 That dataset is not versioned in this repo.
 
-The documented examples in [docs/db200k.md](db200k.md) use small repo-local files under [examples/db200k](../examples/db200k). The structure map points at a local NBR1 AlphaFold model path; if your layout differs, update that TSV before running the example.
+The documented examples in [docs/db200k.md](db200k.md) use small repo-local FASTA files under [examples/db200k](../examples/db200k).
 
 ## Suggested Release Scope
 
@@ -37,6 +37,6 @@ record:
 
 1. Create a clean release commit.
 2. Verify the documented commands in [docs/db200k.md](db200k.md).
-3. Run `pytest -q tests/test_db200k_scan.py`.
+3. Run `pytest -q`.
 4. Tag the release.
 5. Let Zenodo archive the tagged GitHub release.

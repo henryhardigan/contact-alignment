@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+import numpy as np
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from contact_alignment import db200k_scan
+
+
+def make_profile(
+    position: int,
+    center_residue: str,
+    favored: dict[str, float],
+) -> db200k_scan.PositionProfile:
+    energies = np.full(len(db200k_scan.CENTER_ALPHABET), 1.0, dtype=float)
+    for residue, energy in favored.items():
+        energies[db200k_scan.CENTER_ALPHABET.index(residue)] = energy
+    return db200k_scan.PositionProfile(
+        position=position,
+        center_residue=center_residue,
+        query_context=center_residue,
+        energies=energies,
+        energy_stds=np.ones_like(energies),
+        count_5x5=0,
+        count_3x3=0,
+        count_1x1=1,
+        geometry_buckets_5x5=0,
+        geometry_buckets_3x3=0,
+        geometry_buckets_1x1=1,
+        weight_5x5=0.0,
+        weight_3x3=0.0,
+        weight_1x1=1.0,
+        support_mode="test",
+        effective_support=1.0,
+    )
+
+
+def test_shared_donor_rescue_marks_second_claim_with_asterisk():
+    profiles = [
+        make_profile(1, "R", {"A": 1.0, "E": -2.0}),
+        make_profile(2, "A", {"E": 0.5}),
+        make_profile(3, "R", {"A": 1.0, "E": -2.0}),
+    ]
+
+    score, breakdown, donor_indices = db200k_scan.score_window_with_donor_trace("AEA", profiles)
+
+    assert score == -2.7
+    assert breakdown[0] == (1, "A<-E@2", -2.0)
+    assert breakdown[1] == (2, "E", 0.0)
+    assert breakdown[2] == (3, "A<-E@2*", -0.7)
+    assert donor_indices == [1, 1, 1]
+
+
+def test_scan_records_rigid_recovers_expected_best_window():
+    profiles = [
+        make_profile(1, "E", {"L": -1.5}),
+        make_profile(2, "T", {"R": -2.0}),
+        make_profile(3, "S", {"L": -1.25}),
+    ]
+
+    records = [
+        (">decoy", "AAAKKKAAA"),
+        (">target", "QQQLRLQQQ"),
+    ]
+
+    hits, windows_scanned = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=3,
+        alignment_mode="rigid",
+    )
+
+    assert windows_scanned == 14
+    assert hits[0]["header"] == ">target"
+    assert hits[0]["start"] == 4
+    assert hits[0]["end"] == 6
+    assert hits[0]["window"] == "LRL"
+    assert hits[0]["score"] == -4.75
