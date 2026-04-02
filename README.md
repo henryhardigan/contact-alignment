@@ -25,13 +25,13 @@ Release-facing notes for packaging and citation:
 - [requirements-db200k.txt](requirements-db200k.txt)
 - [CITATION.cff](CITATION.cff)
 
-## Branch Scope (DB200K_align)
+## Scope
 
-This branch is a DB200K-focused export intended for citation/archival (e.g., Zenodo):
+This repository is a DB200K-focused export intended for citation and archival:
 - packaged code lives under `contact_alignment/`
 - DB200K command-line entry points are in `scripts/`
 - examples and docs live under `examples/` and `docs/`
-- non-DB200K tooling (mj_align/pocket_pipeline) has been removed
+- non-DB200K tooling has been removed to keep the release lightweight
 
 ## Key References
 
