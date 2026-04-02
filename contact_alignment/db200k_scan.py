@@ -38,7 +38,9 @@ OFFSET_CHARGE_RESCUE_PAIRS = {
     "R": frozenset({"D", "E"}),
     "K": frozenset({"D", "E"}),
 }
-SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT = 0.5
+SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT = 0.35
+SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER = 1.5
+SHARED_DONOR_RESCUE_WEIGHT = 0.35
 GRANTHAM_DIST = {
     ("A","C"):195,("A","D"):126,("A","E"):107,("A","F"):113,("A","G"):60,("A","H"):86,("A","I"):94,("A","K"):106,("A","L"):96,("A","M"):84,("A","N"):111,("A","P"):27,("A","Q"):91,("A","R"):112,("A","S"):99,("A","T"):58,("A","V"):64,("A","W"):148,("A","Y"):112,
     ("C","D"):154,("C","E"):170,("C","F"):205,("C","G"):159,("C","H"):174,("C","I"):198,("C","K"):202,("C","L"):198,("C","M"):196,("C","N"):139,("C","P"):169,("C","Q"):154,("C","R"):180,("C","S"):112,("C","T"):149,("C","V"):192,("C","W"):215,("C","Y"):194,
@@ -1049,16 +1051,26 @@ def _apply_offset_neighbor_rescue_with_trace(
         return sum(entry[2] for entry in adjusted), adjusted, donor_indices
 
     consumed_donor_indices: set[int] = set()
+    donor_claims: dict[int, list[int]] = defaultdict(list)
     for idx, profile in enumerate(profiles):
         if idx in consumed_donor_indices:
             continue
         direct_energy = adjusted[idx][2]
         direct_label = adjusted[idx][1]
-        rescue_candidates: list[tuple[float, float, int, float]] = []
+        rescue_candidates: list[tuple[float, float, int, float, bool]] = []
         for neighbor_idx in (idx - 1, idx + 1):
             if neighbor_idx < 0 or neighbor_idx >= len(window_seq):
                 continue
+            shared_donor = False
             if neighbor_idx in consumed_donor_indices:
+                if (
+                    profile.center_residue not in OFFSET_CHARGE_RESCUE_PAIRS
+                    or neighbor_idx not in donor_claims
+                    or len(donor_claims[neighbor_idx]) >= 2
+                ):
+                    continue
+                shared_donor = True
+            if not shared_donor and neighbor_idx in consumed_donor_indices:
                 continue
             if not _neighbor_rescue_allowed(profile.center_residue, window_seq[neighbor_idx]):
                 continue
@@ -1080,49 +1092,59 @@ def _apply_offset_neighbor_rescue_with_trace(
                     uncertainty_floor=uncertainty_floor,
                 ),
             )
-            donor_energy = adjusted[neighbor_idx][2]
+            if shared_donor:
+                rescued_energy = min(direct_energy, SHARED_DONOR_RESCUE_WEIGHT * rescued_energy)
+            donor_energy = 0.0 if shared_donor else adjusted[neighbor_idx][2]
             improvement = (direct_energy + donor_energy) - rescued_energy
             if improvement > 0.0:
                 delta = rescued_energy - (direct_energy + donor_energy)
-                rescue_candidates.append((delta, improvement, neighbor_idx, rescued_energy))
+                rescue_candidates.append((delta, improvement, neighbor_idx, rescued_energy, shared_donor))
 
         if not rescue_candidates:
             continue
 
-        rescue_candidates.sort(key=lambda item: (item[0], item[3], item[2]))
-        _, primary_improvement, neighbor_idx, rescued_energy = rescue_candidates[0]
+        rescue_candidates.sort(key=lambda item: (item[0], item[3], item[2], item[4]))
+        _, _, neighbor_idx, rescued_energy, primary_shared = rescue_candidates[0]
         rescue_label = direct_label
         donors_to_consume = [neighbor_idx]
         center_energy = rescued_energy
 
-        if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS and len(rescue_candidates) > 1:
-            _, secondary_improvement, secondary_idx, secondary_rescued_energy = rescue_candidates[1]
-            secondary_delta = SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT * secondary_improvement
-            combined_energy = (
-                direct_energy
-                + adjusted[neighbor_idx][2]
-                + adjusted[secondary_idx][2]
-                - (primary_improvement + secondary_delta)
-            )
-            if combined_energy < rescued_energy + adjusted[secondary_idx][2]:
-                donors_to_consume.append(secondary_idx)
-                center_energy = min(center_energy, combined_energy, secondary_rescued_energy)
+        if (
+            not primary_shared
+            and profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
+            and len(rescue_candidates) > 1
+            and not rescue_candidates[1][4]
+        ):
+            _, _, secondary_idx, secondary_rescued_energy, _ = rescue_candidates[1]
+            if secondary_rescued_energy < 0.0:
+                combined_energy = rescued_energy + (
+                    SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT * secondary_rescued_energy
+                )
+                combined_cap = SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER * rescued_energy
+                combined_energy = max(combined_energy, combined_cap)
+                if combined_energy < center_energy:
+                    donors_to_consume.append(secondary_idx)
+                    center_energy = combined_energy
 
         if window_seq[neighbor_idx] != direct_label or rescued_energy < direct_energy:
             if len(donors_to_consume) == 1:
                 rescue_label = f"{_format_rescued_breakdown_label(direct_label, window_seq[neighbor_idx])}@{neighbor_idx+1}"
+                if primary_shared:
+                    rescue_label += "*"
             else:
                 donor_labels = ",".join(f"{window_seq[donor]}@{donor+1}" for donor in donors_to_consume)
                 rescue_label = f"{direct_label}<-{donor_labels}"
         adjusted[idx] = (adjusted[idx][0], rescue_label, center_energy)
         donor_indices[idx] = neighbor_idx
         for donor_idx in donors_to_consume:
-            consumed_donor_indices.add(donor_idx)
-            adjusted[donor_idx] = (
-                adjusted[donor_idx][0],
-                adjusted[donor_idx][1],
-                0.0,
-            )
+            donor_claims[donor_idx].append(idx)
+            if donor_idx not in consumed_donor_indices:
+                consumed_donor_indices.add(donor_idx)
+                adjusted[donor_idx] = (
+                    adjusted[donor_idx][0],
+                    adjusted[donor_idx][1],
+                    0.0,
+                )
 
     return sum(entry[2] for entry in adjusted), adjusted, donor_indices
 
