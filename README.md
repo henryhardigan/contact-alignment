@@ -17,7 +17,7 @@ pip install -e .[db200k]
 Dependencies are listed in `requirements-db200k.txt` and the `db200k` extra in `pyproject.toml`.
 
 ## Quickstart (local example)
-Score the MVP shoulder-loop window (607-623) against the NBR1 UBA domain (913-966):
+Align the MVP shoulder loop segment (607-623) against the NBR1 UBA domain (913-966):
 ```bash
 python scripts/scan_db200k.py \
   --query-seq ETSEAKGPDGMALPRPR \
