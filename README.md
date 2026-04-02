@@ -50,10 +50,11 @@ Then point `--fasta` or `--fasta-glob` at the downloaded file.
 
 ## DB200K Download
 
-DB200K fragment PDBs and energy tables are **not** bundled. Download the public DB200K/SCAAC release (Grigoryan lab) and pass the extracted root with `--db-root`, e.g.:
+DB200K fragment PDBs and energy tables are **not** bundled. Download `DB200K.tar.gz` from the supplemental files of the Protein Science paper “Structure-conditioned amino-acid couplings” (PMC8927866), extract it, and point `--db-root` at the extracted directory, e.g.:
 
 ```bash
-db_root=/path/to/pisces-cache-scaac
+tar -xzf DB200K.tar.gz -C /path/to
+db_root=/path/to/DB200K
 python scripts/scan_db200k.py --db-root "$db_root" ...
 ```
 
