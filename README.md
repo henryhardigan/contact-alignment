@@ -51,6 +51,18 @@ More examples and guidance are in `docs/db200k.md`.
 ## Release Notes
 See `docs/zenodo_release.md` for the checklist used when tagging a Zenodo release (clean tree, docs verified, tests run).
 
+## Minimal FASTA Samples
+- `examples/sprot_min/HUMAN_MVP.fasta` (UniProt Q14764)
+- `examples/sprot_min/HUMAN_NBR1.fasta` (UniProt Q14596)
+
+To test against the full Swiss-Prot set, download directly from UniProt:
+```bash
+# Reviewed (Swiss-Prot) only
+curl -L -o swissprot.fasta.gz \"https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&query=%28reviewed:true%29\"
+gunzip swissprot.fasta.gz
+```
+Then point `--fasta` or `--fasta-glob` at the downloaded file.
+
 ## Key References
 - J. Holland and G. Grigoryan. *Structure-conditioned amino-acid couplings: How contact geometry affects pairwise sequence preferences.* Protein Science, 31(4), 2022. doi:10.1002/pro.4280.
 - R. Kurusu et al. *Integrated proteomics identifies p62-dependent selective autophagy of the supramolecular vault complex.* Developmental Cell, 58(13):1189–1205.e11, 2023. doi:10.1016/j.devcel.2023.04.015.
