@@ -8,7 +8,7 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/henryhardigan/linear-complement-alignment"
+Homepage = "https://github.com/henryhardigan/contact-alignment"
 
 [project.optional-dependencies]
 db200k = [
