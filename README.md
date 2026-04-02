@@ -17,30 +17,15 @@ pip install -e .[db200k]
 Dependencies are listed in `requirements-db200k.txt` and the `db200k` extra in `pyproject.toml`.
 
 ## Quickstart (local example)
-Scan the MVP loop queries against the bundled NBR1 UBA FASTA:
+Score the MVP shoulder-loop window (607-623) against the NBR1 UBA domain (913-957):
 ```bash
 python scripts/scan_db200k.py \
   --query-seq ETSEAKGPDGMALPRPR \
   --db-root /path/to/pisces-cache-scaac \
-  --fasta examples/db200k/nbr1_human_uba_913_959.fasta \
-  --alignment-mode trim_query_one_target_gap \
-  --target-flank 1 \
-  --peripheral-flank-weight 0.5 \
-  --top-k 20
+  --fasta examples/db200k/nbr1_human_uba_913_957.fasta \
+  --top-k 10
 ```
-For accessibility/disorder-aware reranking:
-```bash
-python scripts/scan_db200k_accessibility.py \
-  --query-seq FGFETSEAKGPDGMALPRPRDQA \
-  --db-root /path/to/pisces-cache-scaac \
-  --fasta examples/db200k/nbr1_human_uba_913_959.fasta \
-  --structure-map examples/db200k/nbr1_human_uba_structure_map.tsv \
-  --alignment-mode trim_query_one_target_gap \
-  --target-flank 1 \
-  --peripheral-flank-weight 0.5 \
-  --top-k 5
-```
-More examples and guidance are in `docs/db200k.md`.
+More examples and options are in `docs/db200k.md`.
 
 ## Scripts at a Glance
 - `scan_db200k.py` — raw DB200K scan with alignment breakdowns
