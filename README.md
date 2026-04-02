@@ -21,7 +21,7 @@ Align the MVP shoulder loop segment (607-623) against the NBR1 UBA domain (913-9
 ```bash
 python scripts/scan_db200k.py \
   --query-seq ETSEAKGPDGMALPRPR \
-  --db-root /path/to/DB200K \
+  --db-root /Users/henryhardigan/Downloads/pisces-cache-scaac \
   --fasta examples/db200k/nbr1_human_uba_913_966.fasta \
   --top-k 10
 ```
@@ -54,7 +54,7 @@ DB200K fragment PDBs and energy tables are **not** bundled. Download `DB200K.tar
 
 ```bash
 tar -xzf DB200K.tar.gz -C /path/to
-db_root=/path/to/DB200K
+db_root=/Users/henryhardigan/Downloads/pisces-cache-scaac
 python scripts/scan_db200k.py --db-root "$db_root" ...
 ```
 
