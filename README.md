@@ -21,7 +21,7 @@ Align the MVP shoulder loop segment (607-623) against the NBR1 UBA domain (913-9
 ```bash
 python scripts/scan_db200k.py \
   --query-seq ETSEAKGPDGMALPRPR \
-  --db-root /path/to/pisces-cache-scaac \
+  --db-root /path/to/DB200K \
   --fasta examples/db200k/nbr1_human_uba_913_966.fasta \
   --top-k 10
 ```
