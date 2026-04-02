@@ -52,8 +52,8 @@ More examples and guidance are in `docs/db200k.md`.
 See `docs/zenodo_release.md` for the checklist used when tagging a Zenodo release (clean tree, docs verified, tests run).
 
 ## Minimal FASTA Samples
-- `examples/sprot_min/HUMAN_MVP.fasta` (UniProt Q14764)
-- `examples/sprot_min/HUMAN_NBR1.fasta` (UniProt Q14596)
+- `examples/sprot_min/MVP_HUMAN.fasta` (UniProt Q14764)
+- `examples/sprot_min/NBR1_HUMAN.fasta` (UniProt Q14596)
 
 To test against the full Swiss-Prot set, download directly from UniProt:
 ```bash
