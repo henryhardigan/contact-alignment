@@ -63,6 +63,22 @@ gunzip swissprot.fasta.gz
 ```
 Then point `--fasta` or `--fasta-glob` at the downloaded file.
 
+## DB200K Download
+
+DB200K fragment PDBs and energy tables are **not** bundled. Download the public DB200K/SCAAC release (Grigoryan lab) and pass the extracted root with `--db-root`, e.g.:
+
+```bash
+db_root=/path/to/pisces-cache-scaac
+python scripts/scan_db200k.py --db-root "$db_root" ...
+```
+
+Expected layout under `$db_root`:
+```
+frags-1x1/  frags-3x3/  frags-5x5/
+en-1x1/     en-3x3/     en-5x5/
+```
+Each motif directory holds fragment `.pdb` files and `.etab` energy tables ordered by the DB200K residue alphabet `MGKTRADEYVLQWFSHNPCI`.
+
 ## Key References
 - J. Holland and G. Grigoryan. *Structure-conditioned amino-acid couplings: How contact geometry affects pairwise sequence preferences.* Protein Science, 31(4), 2022. doi:10.1002/pro.4280.
 - R. Kurusu et al. *Integrated proteomics identifies p62-dependent selective autophagy of the supramolecular vault complex.* Developmental Cell, 58(13):1189–1205.e11, 2023. doi:10.1016/j.devcel.2023.04.015.
