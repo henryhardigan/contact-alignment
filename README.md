@@ -25,6 +25,11 @@ Release-facing notes for packaging and citation:
 - [requirements-db200k.txt](requirements-db200k.txt)
 - [CITATION.cff](CITATION.cff)
 
+## Key References
+
+- J. Holland and G. Grigoryan. *Structure-conditioned amino-acid couplings: How contact geometry affects pairwise sequence preferences.* Protein Science, 31(4), 2022. doi:10.1002/pro.4280.
+- R. Kurusu, Y. Fujimoto, H. Morishita, D. Noshiro, S. Takada, K. Yamano, H. Tanaka, R. Arai, S. Kageyama, T. Funakoshi, et al. *Integrated proteomics identifies p62-dependent selective autophagy of the supramolecular vault complex.* Developmental Cell, 58(13):1189–1205.e11, 2023. doi:10.1016/j.devcel.2023.04.015.
+
 ## Running Pocket Queries
 
 This repo expects two inputs:
