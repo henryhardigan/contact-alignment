@@ -1110,12 +1110,10 @@ def _apply_offset_neighbor_rescue_with_trace(
 
         if window_seq[neighbor_idx] != direct_label or rescued_energy < direct_energy:
             if len(donors_to_consume) == 1:
-                rescue_label = _format_rescued_breakdown_label(direct_label, window_seq[neighbor_idx])
+                rescue_label = f"{_format_rescued_breakdown_label(direct_label, window_seq[neighbor_idx])}@{neighbor_idx+1}"
             else:
-                rescue_label = _format_multi_rescued_breakdown_label(
-                    direct_label,
-                    (window_seq[donor] for donor in donors_to_consume),
-                )
+                donor_labels = ",".join(f"{window_seq[donor]}@{donor+1}" for donor in donors_to_consume)
+                rescue_label = f"{direct_label}<-{donor_labels}"
         adjusted[idx] = (adjusted[idx][0], rescue_label, center_energy)
         donor_indices[idx] = neighbor_idx
         for donor_idx in donors_to_consume:
