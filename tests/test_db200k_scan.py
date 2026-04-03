@@ -24,6 +24,7 @@ def make_profile(
     return db200k_scan.PositionProfile(
         position=position,
         center_residue=center_residue,
+        center_residue_index=db200k_scan.RESIDUE_INDEX[center_residue],
         query_context=center_residue,
         energies=energies,
         energy_stds=np.ones_like(energies),
@@ -38,6 +39,8 @@ def make_profile(
         weight_1x1=1.0,
         support_mode="test",
         effective_support=1.0,
+        allows_charge_rescue=center_residue in db200k_scan.OFFSET_CHARGE_RESCUE_PAIRS,
+        allows_aromatic_proline_rescue=center_residue in db200k_scan.AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES,
     )
 
 

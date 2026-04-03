@@ -39,6 +39,14 @@ OFFSET_CHARGE_RESCUE_PAIRS = {
     "R": frozenset({"D", "E"}),
     "K": frozenset({"D", "E"}),
 }
+RESCUE_ALLOWED_MATRIX = tuple(
+    tuple(
+        (source_residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES and target_residue == "P")
+        or target_residue in OFFSET_CHARGE_RESCUE_PAIRS.get(source_residue, ())
+        for target_residue in CENTER_ALPHABET
+    )
+    for source_residue in CENTER_ALPHABET
+)
 SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT = 0.35
 SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER = 1.5
 SHARED_DONOR_RESCUE_WEIGHT = 0.35
@@ -86,6 +94,7 @@ class SequenceIndexEntry:
 class PositionProfile:
     position: int
     center_residue: str
+    center_residue_index: int
     query_context: str
     energies: onp.ndarray
     energy_stds: onp.ndarray
@@ -100,7 +109,10 @@ class PositionProfile:
     weight_1x1: float
     support_mode: str
     effective_support: float
+    allows_charge_rescue: bool
+    allows_aromatic_proline_rescue: bool
     rescue_index_3x3: dict[str, SequenceIndexEntry] | None = None
+    rescue_index_3x3_encoded: dict[int, SequenceIndexEntry] | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +188,23 @@ def _get_cache_dir(db_root: str | Path, cache_dir: str | Path | None = None) -> 
     if cache_dir is not None:
         return Path(cache_dir)
     return Path(db_root) / ".db200k_cache"
+
+
+def _encode_triplet_indices(left_idx: int, center_idx: int, right_idx: int) -> int:
+    return (left_idx * CENTER_ALPHABET_SIZE * CENTER_ALPHABET_SIZE) + (center_idx * CENTER_ALPHABET_SIZE) + right_idx
+
+
+def _build_encoded_triplet_index(
+    index_3x3: dict[str, SequenceIndexEntry],
+) -> dict[int, SequenceIndexEntry]:
+    return {
+        _encode_triplet_indices(
+            RESIDUE_INDEX[triplet[0]],
+            RESIDUE_INDEX[triplet[1]],
+            RESIDUE_INDEX[triplet[2]],
+        ): entry
+        for triplet, entry in index_3x3.items()
+    }
 
 
 def _canonical_db_root(db_root: str | Path) -> str:
@@ -625,9 +654,13 @@ def _make_terminal_1x1_profile(
     if residue not in index_1x1:
         raise ValueError(f"No 1x1 DB200K support found for residue {residue}.")
     entry = index_1x1[residue]
+    rescue_index_3x3_encoded = (
+        _build_encoded_triplet_index(rescue_index_3x3) if rescue_index_3x3 is not None else None
+    )
     return PositionProfile(
         position=position,
         center_residue=residue,
+        center_residue_index=RESIDUE_INDEX[residue],
         query_context=residue,
         energies=entry.mean.copy(),
         energy_stds=entry.std.copy(),
@@ -642,7 +675,10 @@ def _make_terminal_1x1_profile(
         weight_1x1=1.0,
         support_mode="1x1_terminal",
         effective_support=float(entry.count),
+        allows_charge_rescue=residue in OFFSET_CHARGE_RESCUE_PAIRS,
+        allows_aromatic_proline_rescue=residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES,
         rescue_index_3x3=rescue_index_3x3,
+        rescue_index_3x3_encoded=rescue_index_3x3_encoded,
     )
 
 
@@ -702,6 +738,7 @@ def build_query_profiles(
         cache_dir=cache_dir,
         rebuild=rebuild_cache,
     )
+    index_3x3_encoded = _build_encoded_triplet_index(index_3x3)
     index_1x1 = load_one_by_one_index(
         db_root,
         cache_dir=cache_dir,
@@ -880,6 +917,7 @@ def build_query_profiles(
             PositionProfile(
                 position=i,
                 center_residue=center_residue,
+                center_residue_index=RESIDUE_INDEX[center_residue],
                 query_context=triplet,
                 energies=energies,
                 energy_stds=energy_stds,
@@ -894,7 +932,10 @@ def build_query_profiles(
                 weight_1x1=weight_1x1,
                 support_mode=support_mode,
                 effective_support=effective_support,
+                allows_charge_rescue=center_residue in OFFSET_CHARGE_RESCUE_PAIRS,
+                allows_aromatic_proline_rescue=center_residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES,
                 rescue_index_3x3=index_3x3,
+                rescue_index_3x3_encoded=index_3x3_encoded,
             )
         )
 
@@ -956,17 +997,19 @@ def score_window_fast(
         raise ValueError(f"Unsupported score_mode: {score_mode}")
 
     residue_index = RESIDUE_INDEX.__getitem__
+    window_indices = [residue_index(residue) for residue in window_seq]
     adjusted = [
         _score_profile_residue_indexed(
             profile,
-            residue_index(residue),
+            residue_idx,
             score_mode=score_mode,
             uncertainty_floor=uncertainty_floor,
         )
-        for residue, profile in zip(window_seq, profiles)
+        for residue_idx, profile in zip(window_indices, profiles)
     ]
     return _apply_offset_neighbor_rescue_fast(
         window_seq,
+        window_indices,
         profiles,
         adjusted,
         score_mode=score_mode,
@@ -1076,7 +1119,29 @@ def _score_charge_rescue_with_target_centered_3x3(
     target_entry = index_3x3.get(target_triplet)
     if target_entry is None:
         return None
-    return float(target_entry.mean[RESIDUE_INDEX[profile.center_residue]])
+    return float(target_entry.mean[profile.center_residue_index])
+
+
+def _score_charge_rescue_with_target_centered_3x3_fast(
+    profile: PositionProfile,
+    window_indices: list[int],
+    neighbor_idx: int,
+) -> float | None:
+    index_3x3 = profile.rescue_index_3x3_encoded
+    if index_3x3 is None:
+        return None
+    if neighbor_idx <= 0 or neighbor_idx >= len(window_indices) - 1:
+        return None
+    target_entry = index_3x3.get(
+        _encode_triplet_indices(
+            window_indices[neighbor_idx - 1],
+            window_indices[neighbor_idx],
+            window_indices[neighbor_idx + 1],
+        )
+    )
+    if target_entry is None:
+        return None
+    return float(target_entry.mean[profile.center_residue_index])
 
 
 def _apply_offset_neighbor_rescue(
@@ -1099,6 +1164,7 @@ def _apply_offset_neighbor_rescue(
 
 def _apply_offset_neighbor_rescue_fast(
     window_seq: str,
+    window_indices: list[int],
     profiles: list[PositionProfile],
     adjusted: list[float],
     *,
@@ -1111,15 +1177,13 @@ def _apply_offset_neighbor_rescue_fast(
     rescue_positions = [
         idx
         for idx, profile in enumerate(profiles)
-        if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
-        or profile.center_residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES
+        if profile.allows_charge_rescue or profile.allows_aromatic_proline_rescue
     ]
     if not rescue_positions:
         return sum(adjusted)
 
     consumed_donor_indices: set[int] = set()
     donor_claims: dict[int, list[int]] = defaultdict(list)
-    residue_index = RESIDUE_INDEX.__getitem__
     for idx in rescue_positions:
         profile = profiles[idx]
         if idx in consumed_donor_indices:
@@ -1132,19 +1196,19 @@ def _apply_offset_neighbor_rescue_fast(
             shared_donor = False
             if neighbor_idx in consumed_donor_indices:
                 if (
-                    profile.center_residue not in OFFSET_CHARGE_RESCUE_PAIRS
+                    not profile.allows_charge_rescue
                     or neighbor_idx not in donor_claims
                     or len(donor_claims[neighbor_idx]) >= 2
                 ):
                     continue
                 shared_donor = True
-            if not _neighbor_rescue_allowed(profile.center_residue, window_seq[neighbor_idx]):
+            if not RESCUE_ALLOWED_MATRIX[profile.center_residue_index][window_indices[neighbor_idx]]:
                 continue
             contextual_rescue = None
-            if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS:
-                contextual_rescue = _score_charge_rescue_with_target_centered_3x3(
+            if profile.allows_charge_rescue:
+                contextual_rescue = _score_charge_rescue_with_target_centered_3x3_fast(
                     profile,
-                    window_seq,
+                    window_indices,
                     neighbor_idx,
                 )
             rescued_energy = min(
@@ -1153,7 +1217,7 @@ def _apply_offset_neighbor_rescue_fast(
                 if contextual_rescue is not None
                 else _score_profile_residue_indexed(
                     profile,
-                    residue_index(window_seq[neighbor_idx]),
+                    window_indices[neighbor_idx],
                     score_mode=score_mode,
                     uncertainty_floor=uncertainty_floor,
                 ),
@@ -1176,7 +1240,7 @@ def _apply_offset_neighbor_rescue_fast(
 
         if (
             not primary_shared
-            and profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
+            and profile.allows_charge_rescue
             and len(rescue_candidates) > 1
             and not rescue_candidates[1][4]
         ):
@@ -1217,8 +1281,7 @@ def _apply_offset_neighbor_rescue_with_trace(
     rescue_positions = [
         idx
         for idx, profile in enumerate(profiles)
-        if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
-        or profile.center_residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES
+        if profile.allows_charge_rescue or profile.allows_aromatic_proline_rescue
     ]
     if not rescue_positions:
         return sum(entry[2] for entry in adjusted), adjusted, donor_indices
@@ -1238,7 +1301,7 @@ def _apply_offset_neighbor_rescue_with_trace(
             shared_donor = False
             if neighbor_idx in consumed_donor_indices:
                 if (
-                    profile.center_residue not in OFFSET_CHARGE_RESCUE_PAIRS
+                    not profile.allows_charge_rescue
                     or neighbor_idx not in donor_claims
                     or len(donor_claims[neighbor_idx]) >= 2
                 ):
@@ -1249,7 +1312,7 @@ def _apply_offset_neighbor_rescue_with_trace(
             if not _neighbor_rescue_allowed(profile.center_residue, window_seq[neighbor_idx]):
                 continue
             contextual_rescue = None
-            if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS:
+            if profile.allows_charge_rescue:
                 contextual_rescue = _score_charge_rescue_with_target_centered_3x3(
                     profile,
                     window_seq,
@@ -1285,7 +1348,7 @@ def _apply_offset_neighbor_rescue_with_trace(
 
         if (
             not primary_shared
-            and profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
+            and profile.allows_charge_rescue
             and len(rescue_candidates) > 1
             and not rescue_candidates[1][4]
         ):
@@ -1769,16 +1832,6 @@ def scan_records(
                 score = alignment.score
                 breakdown = alignment.breakdown
             scored_windows += 1
-            record = {
-                "header": header,
-                "start": start + 1,
-                "end": start + window_len,
-                "window": window,
-                "score": score,
-                "breakdown": breakdown,
-            }
-            if alignment is not None:
-                record["alignment"] = alignment
             if score_threshold is not None and score > score_threshold:
                 if (
                     progress_every_windows is not None
@@ -1795,6 +1848,16 @@ def scan_records(
                 continue
             threshold_passed += 1
             if top_k is None:
+                record = {
+                    "header": header,
+                    "start": start + 1,
+                    "end": start + window_len,
+                    "window": window,
+                    "score": score,
+                    "breakdown": breakdown,
+                }
+                if alignment is not None:
+                    record["alignment"] = alignment
                 records.append(record)
                 if (
                     progress_every_windows is not None
@@ -1810,6 +1873,31 @@ def scan_records(
                     )
                 continue
 
+            if len(records) >= top_k and -score <= records[0][0]:
+                if (
+                    progress_every_windows is not None
+                    and windows_scanned % progress_every_windows == 0
+                ):
+                    label = progress_label or "scan"
+                    print(
+                        f"[{label}] windows={windows_scanned} "
+                        f"prefilter_passed={prefilter_passed} "
+                        f"scored={scored_windows} "
+                        f"hits={threshold_passed}",
+                        flush=True,
+                    )
+                continue
+
+            record = {
+                "header": header,
+                "start": start + 1,
+                "end": start + window_len,
+                "window": window,
+                "score": score,
+                "breakdown": breakdown,
+            }
+            if alignment is not None:
+                record["alignment"] = alignment
             heap_entry = (-score, entry_idx, record)
             entry_idx += 1
             if len(records) < top_k:
