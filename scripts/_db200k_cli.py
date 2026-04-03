@@ -113,6 +113,11 @@ def add_alignment_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Use score-only rigid scanning and skip per-window breakdown construction.",
     )
+    parser.add_argument(
+        "--numba",
+        action="store_true",
+        help="Use the optional Numba-accelerated rigid fast path when available.",
+    )
 
 
 def add_threshold_arg(parser: argparse.ArgumentParser, *, required: bool) -> None:
@@ -156,4 +161,5 @@ def scan_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
         "target_flank": args.target_flank,
         "peripheral_flank_weight": args.peripheral_flank_weight,
         "fast_scan": args.fast_scan,
+        "use_numba": args.numba,
     }

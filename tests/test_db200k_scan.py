@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -160,3 +161,59 @@ def test_scan_records_fast_scan_skips_invalid_windows_like_standard():
     assert [(hit["start"], hit["end"], hit["window"], hit["score"]) for hit in fast_hits] == [
         (hit["start"], hit["end"], hit["window"], hit["score"]) for hit in standard_hits
     ]
+
+
+@pytest.mark.skipif(not db200k_scan.NUMBA_AVAILABLE, reason="Numba not installed")
+def test_scan_records_numba_fast_matches_python_fast_scores():
+    profiles = [
+        make_profile(1, "R", {"A": 1.0, "E": -2.0}),
+        make_profile(2, "A", {"E": 0.5}),
+        make_profile(3, "R", {"A": 1.0, "E": -2.0}),
+    ]
+    records = [
+        (">target", "QQQAEAQQQ"),
+        (">decoy", "QQQAAAQQQ"),
+    ]
+
+    python_hits, python_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=4,
+        alignment_mode="rigid",
+        fast_scan=True,
+    )
+    numba_hits, numba_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=4,
+        alignment_mode="rigid",
+        fast_scan=True,
+        use_numba=True,
+    )
+
+    assert numba_windows == python_windows
+    assert [(hit["header"], hit["start"], hit["end"], hit["score"]) for hit in numba_hits] == [
+        (hit["header"], hit["start"], hit["end"], hit["score"]) for hit in python_hits
+    ]
+
+
+def test_scan_records_zero_progress_interval_is_treated_as_disabled():
+    profiles = [
+        make_profile(1, "E", {"L": -1.5}),
+        make_profile(2, "T", {"R": -2.0}),
+        make_profile(3, "S", {"L": -1.25}),
+    ]
+    records = [
+        (">target", "QQQLRLQQQ"),
+    ]
+
+    hits, windows_scanned = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=3,
+        alignment_mode="rigid",
+        progress_every_windows=0,
+    )
+
+    assert windows_scanned == 7
+    assert hits[0]["window"] == "LRL"

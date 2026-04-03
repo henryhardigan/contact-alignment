@@ -14,6 +14,14 @@ import numpy as onp
 
 from contact_alignment import db200k, residues
 
+try:  # pragma: no cover - optional accelerator
+    from numba import njit
+
+    NUMBA_AVAILABLE = True
+except Exception:  # pragma: no cover - optional accelerator fallback
+    njit = None
+    NUMBA_AVAILABLE = False
+
 
 THREE_TO_ONE = {three.upper(): one for one, three in residues.RES_CODE.items()}
 CENTER_ALPHABET = residues.RES_ALPHA
@@ -51,6 +59,7 @@ RESCUE_ALLOWED_MATRIX = tuple(
 SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT = 0.35
 SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER = 1.5
 SHARED_DONOR_RESCUE_WEIGHT = 0.35
+NUMBA_RESCUE_SENTINEL = 1.0e6
 GRANTHAM_DIST = {
     ("A","C"):195,("A","D"):126,("A","E"):107,("A","F"):113,("A","G"):60,("A","H"):86,("A","I"):94,("A","K"):106,("A","L"):96,("A","M"):84,("A","N"):111,("A","P"):27,("A","Q"):91,("A","R"):112,("A","S"):99,("A","T"):58,("A","V"):64,("A","W"):148,("A","Y"):112,
     ("C","D"):154,("C","E"):170,("C","F"):205,("C","G"):159,("C","H"):174,("C","I"):198,("C","K"):202,("C","L"):198,("C","M"):196,("C","N"):139,("C","P"):169,("C","Q"):154,("C","R"):180,("C","S"):112,("C","T"):149,("C","V"):192,("C","W"):215,("C","Y"):194,
@@ -89,6 +98,196 @@ def encode_sequence_to_indices(sequence: str) -> list[int]:
 
 def decode_indices_to_sequence(indices: Iterable[int]) -> str:
     return "".join(CENTER_ALPHABET[idx] for idx in indices)
+
+
+def _pack_profiles_for_numba_raw(
+    profiles: list[PositionProfile],
+) -> tuple[onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray]:
+    energies = onp.stack([profile.energies for profile in profiles], axis=0).astype(onp.float64, copy=False)
+    center_indices = onp.asarray([profile.center_residue_index for profile in profiles], dtype=onp.int16)
+    allow_charge = onp.asarray([profile.allows_charge_rescue for profile in profiles], dtype=onp.uint8)
+    rescue_positions = onp.asarray(
+        [
+            idx
+            for idx, profile in enumerate(profiles)
+            if profile.allows_charge_rescue or profile.allows_aromatic_proline_rescue
+        ],
+        dtype=onp.int16,
+    )
+    rescue_tables = onp.full(
+        (len(profiles), CENTER_ALPHABET_SIZE ** 3),
+        NUMBA_RESCUE_SENTINEL,
+        dtype=onp.float64,
+    )
+    for profile_idx, profile in enumerate(profiles):
+        encoded = profile.rescue_index_3x3_encoded
+        if encoded is None:
+            continue
+        for triplet_key, entry in encoded.items():
+            rescue_tables[profile_idx, triplet_key] = float(entry.mean[profile.center_residue_index])
+    rescue_allowed = onp.asarray(RESCUE_ALLOWED_MATRIX, dtype=onp.uint8)
+    return energies, center_indices, allow_charge, rescue_positions, rescue_tables, rescue_allowed
+
+
+if NUMBA_AVAILABLE:  # pragma: no branch
+
+    @njit(cache=True)
+    def _numba_encode_triplet_indices(left_idx: int, center_idx: int, right_idx: int) -> int:
+        return (left_idx * CENTER_ALPHABET_SIZE * CENTER_ALPHABET_SIZE) + (center_idx * CENTER_ALPHABET_SIZE) + right_idx
+
+
+    @njit(cache=True)
+    def _numba_score_window_fast_from_sequence_indices_raw(
+        sequence_indices: onp.ndarray,
+        window_start: int,
+        energies: onp.ndarray,
+        center_indices: onp.ndarray,
+        allow_charge: onp.ndarray,
+        rescue_positions: onp.ndarray,
+        rescue_tables: onp.ndarray,
+        rescue_allowed: onp.ndarray,
+    ) -> float:
+        window_len = energies.shape[0]
+        adjusted = onp.empty(window_len, dtype=onp.float64)
+        for idx in range(window_len):
+            adjusted[idx] = energies[idx, sequence_indices[window_start + idx]]
+
+        if window_len < 2 or rescue_positions.shape[0] == 0:
+            total = 0.0
+            for idx in range(window_len):
+                total += adjusted[idx]
+            return total
+
+        consumed = onp.zeros(window_len, dtype=onp.uint8)
+        donor_claims = onp.zeros(window_len, dtype=onp.uint8)
+
+        for rescue_pos_idx in range(rescue_positions.shape[0]):
+            idx = int(rescue_positions[rescue_pos_idx])
+            if consumed[idx] != 0:
+                continue
+
+            direct_energy = adjusted[idx]
+            best_found = False
+            best_delta = 0.0
+            best_neighbor = -1
+            best_rescued = 0.0
+            best_shared = False
+
+            second_found = False
+            second_delta = 0.0
+            second_neighbor = -1
+            second_rescued = 0.0
+
+            for neighbor_idx in (idx - 1, idx + 1):
+                if neighbor_idx < 0 or neighbor_idx >= window_len:
+                    continue
+                shared = False
+                if consumed[neighbor_idx] != 0:
+                    if allow_charge[idx] == 0 or donor_claims[neighbor_idx] >= 2:
+                        continue
+                    shared = True
+
+                neighbor_residue_idx = int(sequence_indices[window_start + neighbor_idx])
+                if rescue_allowed[int(center_indices[idx]), neighbor_residue_idx] == 0:
+                    continue
+
+                contextual_rescue = NUMBA_RESCUE_SENTINEL
+                if allow_charge[idx] != 0 and neighbor_idx > 0 and neighbor_idx < window_len - 1:
+                    triplet_key = _numba_encode_triplet_indices(
+                        int(sequence_indices[window_start + neighbor_idx - 1]),
+                        neighbor_residue_idx,
+                        int(sequence_indices[window_start + neighbor_idx + 1]),
+                    )
+                    contextual_rescue = rescue_tables[idx, triplet_key]
+
+                rescued_energy = direct_energy
+                if contextual_rescue != NUMBA_RESCUE_SENTINEL:
+                    candidate_energy = contextual_rescue
+                else:
+                    candidate_energy = energies[idx, neighbor_residue_idx]
+                if candidate_energy < rescued_energy:
+                    rescued_energy = candidate_energy
+                if shared:
+                    shared_energy = SHARED_DONOR_RESCUE_WEIGHT * rescued_energy
+                    if shared_energy < direct_energy:
+                        rescued_energy = shared_energy
+                    else:
+                        rescued_energy = direct_energy
+                    donor_energy = 0.0
+                else:
+                    donor_energy = adjusted[neighbor_idx]
+
+                improvement = (direct_energy + donor_energy) - rescued_energy
+                if improvement <= 0.0:
+                    continue
+
+                delta = rescued_energy - (direct_energy + donor_energy)
+                better = (
+                    (not best_found)
+                    or (delta < best_delta)
+                    or (delta == best_delta and rescued_energy < best_rescued)
+                    or (delta == best_delta and rescued_energy == best_rescued and neighbor_idx < best_neighbor)
+                    or (
+                        delta == best_delta
+                        and rescued_energy == best_rescued
+                        and neighbor_idx == best_neighbor
+                        and (0 if not shared else 1) < (0 if not best_shared else 1)
+                    )
+                )
+
+                if better:
+                    if best_found and not best_shared:
+                        second_found = True
+                        second_delta = best_delta
+                        second_neighbor = best_neighbor
+                        second_rescued = best_rescued
+                    best_found = True
+                    best_delta = delta
+                    best_neighbor = neighbor_idx
+                    best_rescued = rescued_energy
+                    best_shared = shared
+                elif (not shared) and (
+                    (not second_found)
+                    or (delta < second_delta)
+                    or (delta == second_delta and rescued_energy < second_rescued)
+                    or (delta == second_delta and rescued_energy == second_rescued and neighbor_idx < second_neighbor)
+                ):
+                    second_found = True
+                    second_delta = delta
+                    second_neighbor = neighbor_idx
+                    second_rescued = rescued_energy
+
+            if not best_found:
+                continue
+
+            center_energy = best_rescued
+            donor1 = best_neighbor
+            donor2 = -1
+
+            if allow_charge[idx] != 0 and (not best_shared) and second_found and second_rescued < 0.0:
+                combined_energy = best_rescued + (SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT * second_rescued)
+                combined_cap = SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER * best_rescued
+                if combined_energy < combined_cap:
+                    combined_energy = combined_cap
+                if combined_energy < center_energy:
+                    center_energy = combined_energy
+                    donor2 = second_neighbor
+
+            adjusted[idx] = center_energy
+            donor_claims[donor1] += 1
+            if consumed[donor1] == 0:
+                consumed[donor1] = 1
+                adjusted[donor1] = 0.0
+            if donor2 >= 0:
+                donor_claims[donor2] += 1
+                if consumed[donor2] == 0:
+                    consumed[donor2] = 1
+                    adjusted[donor2] = 0.0
+
+        total = 0.0
+        for idx in range(window_len):
+            total += adjusted[idx]
+        return total
 
 
 @dataclass(frozen=True)
@@ -1773,6 +1972,7 @@ def scan_records(
     progress_every_windows: int | None = None,
     progress_label: str | None = None,
     fast_scan: bool = False,
+    use_numba: bool = False,
 ) -> tuple[list[dict[str, object]], int]:
     """Scores every sliding window in an iterable of FASTA records."""
     if alignment_mode not in ALIGNMENT_MODES:
@@ -1783,6 +1983,8 @@ def scan_records(
         raise ValueError(f"Unsupported prefilter_score_mode: {prefilter_score_mode}")
     if target_flank < 0:
         raise ValueError("target_flank must be >= 0.")
+    if progress_every_windows is not None and progress_every_windows <= 0:
+        progress_every_windows = None
     records: list[dict[str, object]] | list[tuple[float, int, dict[str, object]]] = []
     entry_idx = 0
     windows_scanned = 0
@@ -1790,13 +1992,28 @@ def scan_records(
     scored_windows = 0
     threshold_passed = 0
     window_len = len(profiles)
+    numba_pack_score = None
+    numba_pack_prefilter = None
+    if (
+        use_numba
+        and NUMBA_AVAILABLE
+        and fast_scan
+        and alignment_mode == "rigid"
+        and score_mode == "raw"
+    ):
+        numba_pack_score = _pack_profiles_for_numba_raw(profiles)
+        if prefilter_score_threshold is not None and prefilter_score_mode == "raw":
+            numba_pack_prefilter = numba_pack_score
     for header, sequence in records_iter:
         if len(sequence) < window_len:
             continue
         encoded_sequence: list[int] | None = None
+        encoded_sequence_array: onp.ndarray | None = None
         invalid_prefix: list[int] | None = None
         if fast_scan and alignment_mode == "rigid":
             encoded_sequence = encode_sequence_to_indices(sequence)
+            if numba_pack_score is not None or numba_pack_prefilter is not None:
+                encoded_sequence_array = onp.asarray(encoded_sequence, dtype=onp.int16)
             invalid_prefix = [0]
             invalid_count = 0
             for residue_idx in encoded_sequence:
@@ -1816,13 +2033,20 @@ def scan_records(
             prefilter_result: tuple[float, list[tuple[int, str, float]]] | None = None
             if prefilter_score_threshold is not None:
                 if fast_scan and alignment_mode == "rigid":
-                    prefilter_score = score_window_fast_from_sequence_indices(
-                        encoded_sequence,
-                        start,
-                        profiles,
-                        score_mode=prefilter_score_mode,
-                        uncertainty_floor=uncertainty_floor,
-                    )
+                    if numba_pack_prefilter is not None:
+                        prefilter_score = _numba_score_window_fast_from_sequence_indices_raw(
+                            encoded_sequence_array,
+                            start,
+                            *numba_pack_prefilter,
+                        )
+                    else:
+                        prefilter_score = score_window_fast_from_sequence_indices(
+                            encoded_sequence,
+                            start,
+                            profiles,
+                            score_mode=prefilter_score_mode,
+                            uncertainty_floor=uncertainty_floor,
+                        )
                     prefilter_result = (prefilter_score, [])
                 else:
                     prefilter_result = score_window(
@@ -1850,6 +2074,12 @@ def scan_records(
                 if fast_scan:
                     if prefilter_result is not None and prefilter_score_mode == score_mode:
                         score = prefilter_result[0]
+                    elif numba_pack_score is not None:
+                        score = _numba_score_window_fast_from_sequence_indices_raw(
+                            encoded_sequence_array,
+                            start,
+                            *numba_pack_score,
+                        )
                     else:
                         score = score_window_fast_from_sequence_indices(
                             encoded_sequence,
@@ -2014,6 +2244,7 @@ def scan_fasta(
     progress_every_windows: int | None = None,
     progress_label: str | None = None,
     fast_scan: bool = False,
+    use_numba: bool = False,
 ) -> list[dict[str, object]]:
     """Scores every sliding window in a FASTA file against a query profile."""
     records, _ = scan_records(
@@ -2035,5 +2266,6 @@ def scan_fasta(
         progress_every_windows=progress_every_windows,
         progress_label=progress_label,
         fast_scan=fast_scan,
+        use_numba=use_numba,
     )
     return records
