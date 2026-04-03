@@ -74,6 +74,21 @@ def test_score_window_fast_matches_traced_score():
     assert fast_score == traced_score
 
 
+def test_score_window_rescue_none_returns_direct_sum():
+    profiles = [
+        make_profile(1, "R", {"A": 1.0, "E": -2.0}),
+        make_profile(2, "A", {"E": 0.5}),
+        make_profile(3, "R", {"A": 1.0, "E": -2.0}),
+    ]
+
+    score, breakdown = db200k_scan.score_window("AEA", profiles, rescue_mode="none")
+    fast_score = db200k_scan.score_window_fast("AEA", profiles, rescue_mode="none")
+
+    assert score == 2.5
+    assert fast_score == score
+    assert breakdown == [(1, "A", 1.0), (2, "E", 0.5), (3, "A", 1.0)]
+
+
 def test_scan_records_rigid_recovers_expected_best_window():
     profiles = [
         make_profile(1, "E", {"L": -1.5}),
@@ -189,6 +204,42 @@ def test_scan_records_numba_fast_matches_python_fast_scores():
         alignment_mode="rigid",
         fast_scan=True,
         use_numba=True,
+    )
+
+    assert numba_windows == python_windows
+    assert [(hit["header"], hit["start"], hit["end"], hit["score"]) for hit in numba_hits] == [
+        (hit["header"], hit["start"], hit["end"], hit["score"]) for hit in python_hits
+    ]
+
+
+@pytest.mark.skipif(not db200k_scan.NUMBA_AVAILABLE, reason="Numba not installed")
+def test_scan_records_numba_fast_matches_python_fast_scores_without_rescue():
+    profiles = [
+        make_profile(1, "R", {"A": 1.0, "E": -2.0}),
+        make_profile(2, "A", {"E": 0.5}),
+        make_profile(3, "R", {"A": 1.0, "E": -2.0}),
+    ]
+    records = [
+        (">target", "QQQAEAQQQ"),
+        (">decoy", "QQQAAAQQQ"),
+    ]
+
+    python_hits, python_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=4,
+        alignment_mode="rigid",
+        fast_scan=True,
+        rescue_mode="none",
+    )
+    numba_hits, numba_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=4,
+        alignment_mode="rigid",
+        fast_scan=True,
+        use_numba=True,
+        rescue_mode="none",
     )
 
     assert numba_windows == python_windows

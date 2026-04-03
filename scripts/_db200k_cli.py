@@ -118,6 +118,13 @@ def add_alignment_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Use the optional Numba-accelerated rigid fast path when available.",
     )
+    parser.add_argument(
+        "--rescue-mode",
+        type=str,
+        default=db200k_scan.RESCUE_MODES[0],
+        choices=db200k_scan.RESCUE_MODES,
+        help="Use full offset/shared rescue logic, or disable rescue for ablation.",
+    )
 
 
 def add_threshold_arg(parser: argparse.ArgumentParser, *, required: bool) -> None:
@@ -162,4 +169,5 @@ def scan_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
         "peripheral_flank_weight": args.peripheral_flank_weight,
         "fast_scan": args.fast_scan,
         "use_numba": args.numba,
+        "rescue_mode": args.rescue_mode,
     }

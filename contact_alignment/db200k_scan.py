@@ -41,6 +41,7 @@ PROFILE_STRATEGIES = (
 ONE_BY_ONE_MODES = ("directed", "reciprocal_sum", "reciprocal_mean")
 ALIGNMENT_MODES = ("rigid", "trim_query_one_target_gap")
 SCORE_MODES = ("raw", "centered", "confidence_adjusted")
+RESCUE_MODES = ("full", "none")
 AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES = frozenset({"F", "W", "Y"})
 OFFSET_CHARGE_RESCUE_PAIRS = {
     "D": frozenset({"R", "K"}),
@@ -102,29 +103,38 @@ def decode_indices_to_sequence(indices: Iterable[int]) -> str:
 
 def _pack_profiles_for_numba_raw(
     profiles: list[PositionProfile],
+    *,
+    rescue_mode: str = "full",
 ) -> tuple[onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray, onp.ndarray]:
+    if rescue_mode not in RESCUE_MODES:
+        raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
     energies = onp.stack([profile.energies for profile in profiles], axis=0).astype(onp.float64, copy=False)
     center_indices = onp.asarray([profile.center_residue_index for profile in profiles], dtype=onp.int16)
-    allow_charge = onp.asarray([profile.allows_charge_rescue for profile in profiles], dtype=onp.uint8)
-    rescue_positions = onp.asarray(
-        [
-            idx
-            for idx, profile in enumerate(profiles)
-            if profile.allows_charge_rescue or profile.allows_aromatic_proline_rescue
-        ],
-        dtype=onp.int16,
-    )
+    if rescue_mode == "none":
+        allow_charge = onp.zeros(len(profiles), dtype=onp.uint8)
+        rescue_positions = onp.empty(0, dtype=onp.int16)
+    else:
+        allow_charge = onp.asarray([profile.allows_charge_rescue for profile in profiles], dtype=onp.uint8)
+        rescue_positions = onp.asarray(
+            [
+                idx
+                for idx, profile in enumerate(profiles)
+                if profile.allows_charge_rescue or profile.allows_aromatic_proline_rescue
+            ],
+            dtype=onp.int16,
+        )
     rescue_tables = onp.full(
         (len(profiles), CENTER_ALPHABET_SIZE ** 3),
         NUMBA_RESCUE_SENTINEL,
         dtype=onp.float64,
     )
-    for profile_idx, profile in enumerate(profiles):
-        encoded = profile.rescue_index_3x3_encoded
-        if encoded is None:
-            continue
-        for triplet_key, entry in encoded.items():
-            rescue_tables[profile_idx, triplet_key] = float(entry.mean[profile.center_residue_index])
+    if rescue_mode == "full":
+        for profile_idx, profile in enumerate(profiles):
+            encoded = profile.rescue_index_3x3_encoded
+            if encoded is None:
+                continue
+            for triplet_key, entry in encoded.items():
+                rescue_tables[profile_idx, triplet_key] = float(entry.mean[profile.center_residue_index])
     rescue_allowed = onp.asarray(RESCUE_ALLOWED_MATRIX, dtype=onp.uint8)
     return energies, center_indices, allow_charge, rescue_positions, rescue_tables, rescue_allowed
 
@@ -1164,12 +1174,15 @@ def score_window(
     *,
     score_mode: str = "raw",
     uncertainty_floor: float = 1.0,
+    rescue_mode: str = "full",
 ) -> tuple[float, list[tuple[int, str, float]]]:
     """Scores a candidate window against a query profile using additive DB200K energies."""
     if len(window_seq) != len(profiles):
         raise ValueError("window_seq length must match the number of profiles.")
     if score_mode not in SCORE_MODES:
         raise ValueError(f"Unsupported score_mode: {score_mode}")
+    if rescue_mode not in RESCUE_MODES:
+        raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
 
     breakdown = []
     residue_index = RESIDUE_INDEX.__getitem__
@@ -1181,6 +1194,8 @@ def score_window(
             uncertainty_floor=uncertainty_floor,
         )
         breakdown.append((profile.position, residue, energy))
+    if rescue_mode == "none":
+        return sum(entry[2] for entry in breakdown), breakdown
     total, adjusted, _ = _apply_offset_neighbor_rescue_with_trace(
         window_seq,
         profiles,
@@ -1197,12 +1212,15 @@ def score_window_fast(
     *,
     score_mode: str = "raw",
     uncertainty_floor: float = 1.0,
+    rescue_mode: str = "full",
 ) -> float:
     """Scores a candidate window without constructing per-position breakdowns."""
     if len(window_seq) != len(profiles):
         raise ValueError("window_seq length must match the number of profiles.")
     if score_mode not in SCORE_MODES:
         raise ValueError(f"Unsupported score_mode: {score_mode}")
+    if rescue_mode not in RESCUE_MODES:
+        raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
 
     residue_index = RESIDUE_INDEX.__getitem__
     window_indices = [residue_index(residue) for residue in window_seq]
@@ -1212,6 +1230,7 @@ def score_window_fast(
         profiles,
         score_mode=score_mode,
         uncertainty_floor=uncertainty_floor,
+        rescue_mode=rescue_mode,
     )
 
 
@@ -1222,6 +1241,7 @@ def score_window_fast_from_sequence_indices(
     *,
     score_mode: str = "raw",
     uncertainty_floor: float = 1.0,
+    rescue_mode: str = "full",
 ) -> float:
     """Scores a candidate window from an integer-encoded target sequence."""
     window_len = len(profiles)
@@ -1229,6 +1249,8 @@ def score_window_fast_from_sequence_indices(
         raise ValueError("Encoded sequence is shorter than the requested window.")
     if score_mode not in SCORE_MODES:
         raise ValueError(f"Unsupported score_mode: {score_mode}")
+    if rescue_mode not in RESCUE_MODES:
+        raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
 
     adjusted = [
         _score_profile_residue_indexed(
@@ -1239,6 +1261,8 @@ def score_window_fast_from_sequence_indices(
         )
         for idx, profile in enumerate(profiles)
     ]
+    if rescue_mode == "none":
+        return sum(adjusted)
     return _apply_offset_neighbor_rescue_fast_at(
         sequence_indices,
         window_start,
@@ -1255,12 +1279,15 @@ def score_window_with_donor_trace(
     *,
     score_mode: str = "raw",
     uncertainty_floor: float = 1.0,
+    rescue_mode: str = "full",
 ) -> tuple[float, list[tuple[int, str, float]], list[int]]:
     """Like score_window(), but also returns the target donor index for each position."""
     if len(window_seq) != len(profiles):
         raise ValueError("window_seq length must match the number of profiles.")
     if score_mode not in SCORE_MODES:
         raise ValueError(f"Unsupported score_mode: {score_mode}")
+    if rescue_mode not in RESCUE_MODES:
+        raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
 
     breakdown = []
     residue_index = RESIDUE_INDEX.__getitem__
@@ -1272,6 +1299,8 @@ def score_window_with_donor_trace(
             uncertainty_floor=uncertainty_floor,
         )
         breakdown.append((profile.position, residue, energy))
+    if rescue_mode == "none":
+        return sum(entry[2] for entry in breakdown), breakdown, list(range(len(window_seq)))
     return _apply_offset_neighbor_rescue_with_trace(
         window_seq,
         profiles,
@@ -1818,6 +1847,7 @@ def score_window_semiglobal(
     *,
     score_mode: str = "raw",
     uncertainty_floor: float = 1.0,
+    rescue_mode: str = "full",
     max_target_gaps: int = 1,
     min_aligned_positions: int | None = None,
     target_gap_penalty: float = 0.0,
@@ -1842,6 +1872,8 @@ def score_window_semiglobal(
         raise ValueError("peripheral_flank_weight must be between 0.0 and 1.0.")
     if score_mode not in SCORE_MODES:
         raise ValueError(f"Unsupported score_mode: {score_mode}")
+    if rescue_mode not in RESCUE_MODES:
+        raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
 
     best: AlignmentResult | None = None
     for q_start in range(n_profiles):
@@ -1856,6 +1888,7 @@ def score_window_semiglobal(
                     sub_profiles,
                     score_mode=score_mode,
                     uncertainty_floor=uncertainty_floor,
+                    rescue_mode=rescue_mode,
                 )
                 aligned_target_indices = list(range(t_start + 1, t_start + aligned_len + 1))
                 score, breakdown, peripheral_breakdown = _apply_peripheral_rescue(
@@ -1894,6 +1927,7 @@ def score_window_semiglobal(
                         sub_profiles,
                         score_mode=score_mode,
                         uncertainty_floor=uncertainty_floor,
+                        rescue_mode=rescue_mode,
                     )
                     aligned_target_indices = [
                         t_start + offset + 1 for offset in range(aligned_len + 1) if offset != gap_pos
@@ -1973,6 +2007,7 @@ def scan_records(
     progress_label: str | None = None,
     fast_scan: bool = False,
     use_numba: bool = False,
+    rescue_mode: str = "full",
 ) -> tuple[list[dict[str, object]], int]:
     """Scores every sliding window in an iterable of FASTA records."""
     if alignment_mode not in ALIGNMENT_MODES:
@@ -1981,6 +2016,8 @@ def scan_records(
         raise ValueError(f"Unsupported score_mode: {score_mode}")
     if prefilter_score_mode not in SCORE_MODES:
         raise ValueError(f"Unsupported prefilter_score_mode: {prefilter_score_mode}")
+    if rescue_mode not in RESCUE_MODES:
+        raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
     if target_flank < 0:
         raise ValueError("target_flank must be >= 0.")
     if progress_every_windows is not None and progress_every_windows <= 0:
@@ -2001,7 +2038,7 @@ def scan_records(
         and alignment_mode == "rigid"
         and score_mode == "raw"
     ):
-        numba_pack_score = _pack_profiles_for_numba_raw(profiles)
+        numba_pack_score = _pack_profiles_for_numba_raw(profiles, rescue_mode=rescue_mode)
         if prefilter_score_threshold is not None and prefilter_score_mode == "raw":
             numba_pack_prefilter = numba_pack_score
     for header, sequence in records_iter:
@@ -2046,6 +2083,7 @@ def scan_records(
                             profiles,
                             score_mode=prefilter_score_mode,
                             uncertainty_floor=uncertainty_floor,
+                            rescue_mode=rescue_mode,
                         )
                     prefilter_result = (prefilter_score, [])
                 else:
@@ -2087,6 +2125,7 @@ def scan_records(
                             profiles,
                             score_mode=score_mode,
                             uncertainty_floor=uncertainty_floor,
+                            rescue_mode=rescue_mode,
                         )
                     breakdown = []
                 elif prefilter_result is not None and prefilter_score_mode == score_mode:
@@ -2097,6 +2136,7 @@ def scan_records(
                         profiles,
                         score_mode=score_mode,
                         uncertainty_floor=uncertainty_floor,
+                        rescue_mode=rescue_mode,
                     )
                 alignment = None
             else:
@@ -2110,6 +2150,7 @@ def scan_records(
                     profiles,
                     score_mode=score_mode,
                     uncertainty_floor=uncertainty_floor,
+                    rescue_mode=rescue_mode,
                     max_target_gaps=max_target_gaps,
                     min_aligned_positions=min_aligned_positions,
                     target_gap_penalty=target_gap_penalty,
@@ -2245,6 +2286,7 @@ def scan_fasta(
     progress_label: str | None = None,
     fast_scan: bool = False,
     use_numba: bool = False,
+    rescue_mode: str = "full",
 ) -> list[dict[str, object]]:
     """Scores every sliding window in a FASTA file against a query profile."""
     records, _ = scan_records(
@@ -2267,5 +2309,6 @@ def scan_fasta(
         progress_label=progress_label,
         fast_scan=fast_scan,
         use_numba=use_numba,
+        rescue_mode=rescue_mode,
     )
     return records
