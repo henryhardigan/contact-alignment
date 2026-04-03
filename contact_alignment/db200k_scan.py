@@ -18,6 +18,7 @@ from contact_alignment import db200k, residues
 THREE_TO_ONE = {three.upper(): one for one, three in residues.RES_CODE.items()}
 CENTER_ALPHABET = residues.RES_ALPHA
 CENTER_ALPHABET_SET = set(CENTER_ALPHABET)
+RESIDUE_INDEX = {residue: idx for idx, residue in enumerate(CENTER_ALPHABET)}
 CENTER_ALPHABET_SIZE = residues.NUM_RESIDUES
 CACHE_VERSION = 4
 DEGENERATE_5X5_BLEND_WEIGHT = 0.25
@@ -922,8 +923,14 @@ def score_window(
         raise ValueError(f"Unsupported score_mode: {score_mode}")
 
     breakdown = []
+    residue_index = RESIDUE_INDEX.__getitem__
     for residue, profile in zip(window_seq, profiles):
-        energy = _score_profile_residue(profile, residue, score_mode=score_mode, uncertainty_floor=uncertainty_floor)
+        energy = _score_profile_residue_indexed(
+            profile,
+            residue_index(residue),
+            score_mode=score_mode,
+            uncertainty_floor=uncertainty_floor,
+        )
         breakdown.append((profile.position, residue, energy))
     total, adjusted, _ = _apply_offset_neighbor_rescue_with_trace(
         window_seq,
@@ -933,6 +940,38 @@ def score_window(
         uncertainty_floor=uncertainty_floor,
     )
     return total, adjusted
+
+
+def score_window_fast(
+    window_seq: str,
+    profiles: list[PositionProfile],
+    *,
+    score_mode: str = "raw",
+    uncertainty_floor: float = 1.0,
+) -> float:
+    """Scores a candidate window without constructing per-position breakdowns."""
+    if len(window_seq) != len(profiles):
+        raise ValueError("window_seq length must match the number of profiles.")
+    if score_mode not in SCORE_MODES:
+        raise ValueError(f"Unsupported score_mode: {score_mode}")
+
+    residue_index = RESIDUE_INDEX.__getitem__
+    adjusted = [
+        _score_profile_residue_indexed(
+            profile,
+            residue_index(residue),
+            score_mode=score_mode,
+            uncertainty_floor=uncertainty_floor,
+        )
+        for residue, profile in zip(window_seq, profiles)
+    ]
+    return _apply_offset_neighbor_rescue_fast(
+        window_seq,
+        profiles,
+        adjusted,
+        score_mode=score_mode,
+        uncertainty_floor=uncertainty_floor,
+    )
 
 
 def score_window_with_donor_trace(
@@ -949,8 +988,14 @@ def score_window_with_donor_trace(
         raise ValueError(f"Unsupported score_mode: {score_mode}")
 
     breakdown = []
+    residue_index = RESIDUE_INDEX.__getitem__
     for residue, profile in zip(window_seq, profiles):
-        energy = _score_profile_residue(profile, residue, score_mode=score_mode, uncertainty_floor=uncertainty_floor)
+        energy = _score_profile_residue_indexed(
+            profile,
+            residue_index(residue),
+            score_mode=score_mode,
+            uncertainty_floor=uncertainty_floor,
+        )
         breakdown.append((profile.position, residue, energy))
     return _apply_offset_neighbor_rescue_with_trace(
         window_seq,
@@ -970,7 +1015,22 @@ def _score_profile_residue(
 ) -> float:
     if residue not in CENTER_ALPHABET_SET:
         raise ValueError(f"Unsupported residue in window_seq: {residue}")
-    residue_idx = CENTER_ALPHABET.index(residue)
+    residue_idx = RESIDUE_INDEX[residue]
+    return _score_profile_residue_indexed(
+        profile,
+        residue_idx,
+        score_mode=score_mode,
+        uncertainty_floor=uncertainty_floor,
+    )
+
+
+def _score_profile_residue_indexed(
+    profile: PositionProfile,
+    residue_idx: int,
+    *,
+    score_mode: str = "raw",
+    uncertainty_floor: float = 1.0,
+) -> float:
     energy = float(profile.energies[residue_idx])
     if score_mode == "raw":
         return energy
@@ -1016,7 +1076,7 @@ def _score_charge_rescue_with_target_centered_3x3(
     target_entry = index_3x3.get(target_triplet)
     if target_entry is None:
         return None
-    return float(target_entry.mean[CENTER_ALPHABET.index(profile.center_residue)])
+    return float(target_entry.mean[RESIDUE_INDEX[profile.center_residue]])
 
 
 def _apply_offset_neighbor_rescue(
@@ -1037,6 +1097,110 @@ def _apply_offset_neighbor_rescue(
     return total, adjusted
 
 
+def _apply_offset_neighbor_rescue_fast(
+    window_seq: str,
+    profiles: list[PositionProfile],
+    adjusted: list[float],
+    *,
+    score_mode: str = "raw",
+    uncertainty_floor: float = 1.0,
+) -> float:
+    if len(window_seq) < 2:
+        return sum(adjusted)
+
+    rescue_positions = [
+        idx
+        for idx, profile in enumerate(profiles)
+        if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
+        or profile.center_residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES
+    ]
+    if not rescue_positions:
+        return sum(adjusted)
+
+    consumed_donor_indices: set[int] = set()
+    donor_claims: dict[int, list[int]] = defaultdict(list)
+    residue_index = RESIDUE_INDEX.__getitem__
+    for idx in rescue_positions:
+        profile = profiles[idx]
+        if idx in consumed_donor_indices:
+            continue
+        direct_energy = adjusted[idx]
+        rescue_candidates: list[tuple[float, float, int, float, bool]] = []
+        for neighbor_idx in (idx - 1, idx + 1):
+            if neighbor_idx < 0 or neighbor_idx >= len(window_seq):
+                continue
+            shared_donor = False
+            if neighbor_idx in consumed_donor_indices:
+                if (
+                    profile.center_residue not in OFFSET_CHARGE_RESCUE_PAIRS
+                    or neighbor_idx not in donor_claims
+                    or len(donor_claims[neighbor_idx]) >= 2
+                ):
+                    continue
+                shared_donor = True
+            if not _neighbor_rescue_allowed(profile.center_residue, window_seq[neighbor_idx]):
+                continue
+            contextual_rescue = None
+            if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS:
+                contextual_rescue = _score_charge_rescue_with_target_centered_3x3(
+                    profile,
+                    window_seq,
+                    neighbor_idx,
+                )
+            rescued_energy = min(
+                direct_energy,
+                contextual_rescue
+                if contextual_rescue is not None
+                else _score_profile_residue_indexed(
+                    profile,
+                    residue_index(window_seq[neighbor_idx]),
+                    score_mode=score_mode,
+                    uncertainty_floor=uncertainty_floor,
+                ),
+            )
+            if shared_donor:
+                rescued_energy = min(direct_energy, SHARED_DONOR_RESCUE_WEIGHT * rescued_energy)
+            donor_energy = 0.0 if shared_donor else adjusted[neighbor_idx]
+            improvement = (direct_energy + donor_energy) - rescued_energy
+            if improvement > 0.0:
+                delta = rescued_energy - (direct_energy + donor_energy)
+                rescue_candidates.append((delta, improvement, neighbor_idx, rescued_energy, shared_donor))
+
+        if not rescue_candidates:
+            continue
+
+        rescue_candidates.sort(key=lambda item: (item[0], item[3], item[2], item[4]))
+        _, _, neighbor_idx, rescued_energy, primary_shared = rescue_candidates[0]
+        donors_to_consume = [neighbor_idx]
+        center_energy = rescued_energy
+
+        if (
+            not primary_shared
+            and profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
+            and len(rescue_candidates) > 1
+            and not rescue_candidates[1][4]
+        ):
+            _, _, secondary_idx, secondary_rescued_energy, _ = rescue_candidates[1]
+            if secondary_rescued_energy < 0.0:
+                combined_energy = rescued_energy + (
+                    SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT * secondary_rescued_energy
+                )
+                combined_cap = SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER * rescued_energy
+                combined_energy = max(combined_energy, combined_cap)
+                if combined_energy < center_energy:
+                    donors_to_consume.append(secondary_idx)
+                    center_energy = combined_energy
+
+        adjusted[idx] = center_energy
+        for donor_idx in donors_to_consume:
+            donor_claims[donor_idx].append(idx)
+            if donor_idx not in consumed_donor_indices:
+                consumed_donor_indices.add(donor_idx)
+                adjusted[donor_idx] = 0.0
+
+    return sum(adjusted)
+
+
 def _apply_offset_neighbor_rescue_with_trace(
     window_seq: str,
     profiles: list[PositionProfile],
@@ -1050,9 +1214,19 @@ def _apply_offset_neighbor_rescue_with_trace(
     if len(window_seq) < 2:
         return sum(entry[2] for entry in adjusted), adjusted, donor_indices
 
+    rescue_positions = [
+        idx
+        for idx, profile in enumerate(profiles)
+        if profile.center_residue in OFFSET_CHARGE_RESCUE_PAIRS
+        or profile.center_residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES
+    ]
+    if not rescue_positions:
+        return sum(entry[2] for entry in adjusted), adjusted, donor_indices
+
     consumed_donor_indices: set[int] = set()
     donor_claims: dict[int, list[int]] = defaultdict(list)
-    for idx, profile in enumerate(profiles):
+    for idx in rescue_positions:
+        profile = profiles[idx]
         if idx in consumed_donor_indices:
             continue
         direct_energy = adjusted[idx][2]
@@ -1495,6 +1669,7 @@ def scan_records(
     stats: dict[str, int] | None = None,
     progress_every_windows: int | None = None,
     progress_label: str | None = None,
+    fast_scan: bool = False,
 ) -> tuple[list[dict[str, object]], int]:
     """Scores every sliding window in an iterable of FASTA records."""
     if alignment_mode not in ALIGNMENT_MODES:
@@ -1522,12 +1697,21 @@ def scan_records(
             windows_scanned += 1
             prefilter_result: tuple[float, list[tuple[int, str, float]]] | None = None
             if prefilter_score_threshold is not None:
-                prefilter_result = score_window(
-                    window,
-                    profiles,
-                    score_mode=prefilter_score_mode,
-                    uncertainty_floor=uncertainty_floor,
-                )
+                if fast_scan and alignment_mode == "rigid":
+                    prefilter_score = score_window_fast(
+                        window,
+                        profiles,
+                        score_mode=prefilter_score_mode,
+                        uncertainty_floor=uncertainty_floor,
+                    )
+                    prefilter_result = (prefilter_score, [])
+                else:
+                    prefilter_result = score_window(
+                        window,
+                        profiles,
+                        score_mode=prefilter_score_mode,
+                        uncertainty_floor=uncertainty_floor,
+                    )
                 if prefilter_result[0] > prefilter_score_threshold:
                     if (
                         progress_every_windows is not None
@@ -1544,7 +1728,18 @@ def scan_records(
                     continue
                 prefilter_passed += 1
             if alignment_mode == "rigid":
-                if prefilter_result is not None and prefilter_score_mode == score_mode:
+                if fast_scan:
+                    if prefilter_result is not None and prefilter_score_mode == score_mode:
+                        score = prefilter_result[0]
+                    else:
+                        score = score_window_fast(
+                            window,
+                            profiles,
+                            score_mode=score_mode,
+                            uncertainty_floor=uncertainty_floor,
+                        )
+                    breakdown = []
+                elif prefilter_result is not None and prefilter_score_mode == score_mode:
                     score, breakdown = prefilter_result
                 else:
                     score, breakdown = score_window(
@@ -1669,6 +1864,7 @@ def scan_fasta(
     stats: dict[str, int] | None = None,
     progress_every_windows: int | None = None,
     progress_label: str | None = None,
+    fast_scan: bool = False,
 ) -> list[dict[str, object]]:
     """Scores every sliding window in a FASTA file against a query profile."""
     records, _ = scan_records(
@@ -1689,5 +1885,6 @@ def scan_fasta(
         stats=stats,
         progress_every_windows=progress_every_windows,
         progress_label=progress_label,
+        fast_scan=fast_scan,
     )
     return records

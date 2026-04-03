@@ -108,6 +108,11 @@ def add_alignment_args(parser: argparse.ArgumentParser) -> None:
         default=0.5,
         help="Interpolation weight for favorable +/-1 flank contacts at non-rigid alignment boundaries.",
     )
+    parser.add_argument(
+        "--fast-scan",
+        action="store_true",
+        help="Use score-only rigid scanning and skip per-window breakdown construction.",
+    )
 
 
 def add_threshold_arg(parser: argparse.ArgumentParser, *, required: bool) -> None:
@@ -150,4 +155,5 @@ def scan_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
         "target_gap_penalty": args.target_gap_penalty,
         "target_flank": args.target_flank,
         "peripheral_flank_weight": args.peripheral_flank_weight,
+        "fast_scan": args.fast_scan,
     }

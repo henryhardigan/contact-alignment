@@ -57,6 +57,19 @@ def test_shared_donor_rescue_marks_second_claim_with_asterisk():
     assert donor_indices == [1, 1, 1]
 
 
+def test_score_window_fast_matches_traced_score():
+    profiles = [
+        make_profile(1, "R", {"A": 1.0, "E": -2.0}),
+        make_profile(2, "A", {"E": 0.5}),
+        make_profile(3, "R", {"A": 1.0, "E": -2.0}),
+    ]
+
+    traced_score, _ = db200k_scan.score_window("AEA", profiles)
+    fast_score = db200k_scan.score_window_fast("AEA", profiles)
+
+    assert fast_score == traced_score
+
+
 def test_scan_records_rigid_recovers_expected_best_window():
     profiles = [
         make_profile(1, "E", {"L": -1.5}),
@@ -82,3 +95,35 @@ def test_scan_records_rigid_recovers_expected_best_window():
     assert hits[0]["end"] == 6
     assert hits[0]["window"] == "LRL"
     assert hits[0]["score"] == -4.75
+
+
+def test_scan_records_fast_scan_matches_standard_scores():
+    profiles = [
+        make_profile(1, "R", {"A": 1.0, "E": -2.0}),
+        make_profile(2, "A", {"E": 0.5}),
+        make_profile(3, "R", {"A": 1.0, "E": -2.0}),
+    ]
+    records = [
+        (">target", "QQQAEAQQQ"),
+        (">decoy", "QQQAAAQQQ"),
+    ]
+
+    standard_hits, standard_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=4,
+        alignment_mode="rigid",
+    )
+    fast_hits, fast_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=4,
+        alignment_mode="rigid",
+        fast_scan=True,
+    )
+
+    assert fast_windows == standard_windows
+    assert [(hit["header"], hit["start"], hit["end"], hit["score"]) for hit in fast_hits] == [
+        (hit["header"], hit["start"], hit["end"], hit["score"]) for hit in standard_hits
+    ]
+    assert all(hit["breakdown"] == [] for hit in fast_hits)
