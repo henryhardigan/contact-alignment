@@ -20,6 +20,7 @@ CENTER_ALPHABET = residues.RES_ALPHA
 CENTER_ALPHABET_SET = set(CENTER_ALPHABET)
 RESIDUE_INDEX = {residue: idx for idx, residue in enumerate(CENTER_ALPHABET)}
 CENTER_ALPHABET_SIZE = residues.NUM_RESIDUES
+INVALID_RESIDUE_INDEX = -1
 CACHE_VERSION = 4
 DEGENERATE_5X5_BLEND_WEIGHT = 0.25
 LATENT_GEOMETRY_TEMPERATURE = 1.0
@@ -80,6 +81,14 @@ def _grantham_distance(a: str, b: str) -> int:
     if (b, a) in GRANTHAM_DIST:
         return GRANTHAM_DIST[(b, a)]
     return 999
+
+
+def encode_sequence_to_indices(sequence: str) -> list[int]:
+    return [RESIDUE_INDEX.get(residue, INVALID_RESIDUE_INDEX) for residue in sequence]
+
+
+def decode_indices_to_sequence(indices: Iterable[int]) -> str:
+    return "".join(CENTER_ALPHABET[idx] for idx in indices)
 
 
 @dataclass(frozen=True)
@@ -998,18 +1007,42 @@ def score_window_fast(
 
     residue_index = RESIDUE_INDEX.__getitem__
     window_indices = [residue_index(residue) for residue in window_seq]
+    return score_window_fast_from_sequence_indices(
+        window_indices,
+        0,
+        profiles,
+        score_mode=score_mode,
+        uncertainty_floor=uncertainty_floor,
+    )
+
+
+def score_window_fast_from_sequence_indices(
+    sequence_indices: list[int],
+    window_start: int,
+    profiles: list[PositionProfile],
+    *,
+    score_mode: str = "raw",
+    uncertainty_floor: float = 1.0,
+) -> float:
+    """Scores a candidate window from an integer-encoded target sequence."""
+    window_len = len(profiles)
+    if len(sequence_indices) < window_start + window_len:
+        raise ValueError("Encoded sequence is shorter than the requested window.")
+    if score_mode not in SCORE_MODES:
+        raise ValueError(f"Unsupported score_mode: {score_mode}")
+
     adjusted = [
         _score_profile_residue_indexed(
             profile,
-            residue_idx,
+            sequence_indices[window_start + idx],
             score_mode=score_mode,
             uncertainty_floor=uncertainty_floor,
         )
-        for residue_idx, profile in zip(window_indices, profiles)
+        for idx, profile in enumerate(profiles)
     ]
-    return _apply_offset_neighbor_rescue_fast(
-        window_seq,
-        window_indices,
+    return _apply_offset_neighbor_rescue_fast_at(
+        sequence_indices,
+        window_start,
         profiles,
         adjusted,
         score_mode=score_mode,
@@ -1122,21 +1155,24 @@ def _score_charge_rescue_with_target_centered_3x3(
     return float(target_entry.mean[profile.center_residue_index])
 
 
-def _score_charge_rescue_with_target_centered_3x3_fast(
+def _score_charge_rescue_with_target_centered_3x3_fast_at(
     profile: PositionProfile,
-    window_indices: list[int],
+    sequence_indices: list[int],
+    window_start: int,
+    window_len: int,
     neighbor_idx: int,
 ) -> float | None:
     index_3x3 = profile.rescue_index_3x3_encoded
     if index_3x3 is None:
         return None
-    if neighbor_idx <= 0 or neighbor_idx >= len(window_indices) - 1:
+    if neighbor_idx <= 0 or neighbor_idx >= window_len - 1:
         return None
+    absolute_idx = window_start + neighbor_idx
     target_entry = index_3x3.get(
         _encode_triplet_indices(
-            window_indices[neighbor_idx - 1],
-            window_indices[neighbor_idx],
-            window_indices[neighbor_idx + 1],
+            sequence_indices[absolute_idx - 1],
+            sequence_indices[absolute_idx],
+            sequence_indices[absolute_idx + 1],
         )
     )
     if target_entry is None:
@@ -1162,16 +1198,17 @@ def _apply_offset_neighbor_rescue(
     return total, adjusted
 
 
-def _apply_offset_neighbor_rescue_fast(
-    window_seq: str,
-    window_indices: list[int],
+def _apply_offset_neighbor_rescue_fast_at(
+    sequence_indices: list[int],
+    window_start: int,
     profiles: list[PositionProfile],
     adjusted: list[float],
     *,
     score_mode: str = "raw",
     uncertainty_floor: float = 1.0,
 ) -> float:
-    if len(window_seq) < 2:
+    window_len = len(profiles)
+    if window_len < 2:
         return sum(adjusted)
 
     rescue_positions = [
@@ -1191,8 +1228,9 @@ def _apply_offset_neighbor_rescue_fast(
         direct_energy = adjusted[idx]
         rescue_candidates: list[tuple[float, float, int, float, bool]] = []
         for neighbor_idx in (idx - 1, idx + 1):
-            if neighbor_idx < 0 or neighbor_idx >= len(window_seq):
+            if neighbor_idx < 0 or neighbor_idx >= window_len:
                 continue
+            absolute_neighbor_idx = window_start + neighbor_idx
             shared_donor = False
             if neighbor_idx in consumed_donor_indices:
                 if (
@@ -1202,13 +1240,15 @@ def _apply_offset_neighbor_rescue_fast(
                 ):
                     continue
                 shared_donor = True
-            if not RESCUE_ALLOWED_MATRIX[profile.center_residue_index][window_indices[neighbor_idx]]:
+            if not RESCUE_ALLOWED_MATRIX[profile.center_residue_index][sequence_indices[absolute_neighbor_idx]]:
                 continue
             contextual_rescue = None
             if profile.allows_charge_rescue:
-                contextual_rescue = _score_charge_rescue_with_target_centered_3x3_fast(
+                contextual_rescue = _score_charge_rescue_with_target_centered_3x3_fast_at(
                     profile,
-                    window_indices,
+                    sequence_indices,
+                    window_start,
+                    window_len,
                     neighbor_idx,
                 )
             rescued_energy = min(
@@ -1217,7 +1257,7 @@ def _apply_offset_neighbor_rescue_fast(
                 if contextual_rescue is not None
                 else _score_profile_residue_indexed(
                     profile,
-                    window_indices[neighbor_idx],
+                    sequence_indices[absolute_neighbor_idx],
                     score_mode=score_mode,
                     uncertainty_floor=uncertainty_floor,
                 ),
@@ -1753,16 +1793,32 @@ def scan_records(
     for header, sequence in records_iter:
         if len(sequence) < window_len:
             continue
+        encoded_sequence: list[int] | None = None
+        invalid_prefix: list[int] | None = None
+        if fast_scan and alignment_mode == "rigid":
+            encoded_sequence = encode_sequence_to_indices(sequence)
+            invalid_prefix = [0]
+            invalid_count = 0
+            for residue_idx in encoded_sequence:
+                if residue_idx == INVALID_RESIDUE_INDEX:
+                    invalid_count += 1
+                invalid_prefix.append(invalid_count)
         for start in range(len(sequence) - window_len + 1):
-            window = sequence[start : start + window_len]
-            if any(res not in CENTER_ALPHABET_SET for res in window):
-                continue
+            if encoded_sequence is not None and invalid_prefix is not None:
+                if invalid_prefix[start + window_len] != invalid_prefix[start]:
+                    continue
+                window = None
+            else:
+                window = sequence[start : start + window_len]
+                if any(res not in CENTER_ALPHABET_SET for res in window):
+                    continue
             windows_scanned += 1
             prefilter_result: tuple[float, list[tuple[int, str, float]]] | None = None
             if prefilter_score_threshold is not None:
                 if fast_scan and alignment_mode == "rigid":
-                    prefilter_score = score_window_fast(
-                        window,
+                    prefilter_score = score_window_fast_from_sequence_indices(
+                        encoded_sequence,
+                        start,
                         profiles,
                         score_mode=prefilter_score_mode,
                         uncertainty_floor=uncertainty_floor,
@@ -1795,8 +1851,9 @@ def scan_records(
                     if prefilter_result is not None and prefilter_score_mode == score_mode:
                         score = prefilter_result[0]
                     else:
-                        score = score_window_fast(
-                            window,
+                        score = score_window_fast_from_sequence_indices(
+                            encoded_sequence,
+                            start,
                             profiles,
                             score_mode=score_mode,
                             uncertainty_floor=uncertainty_floor,
@@ -1848,6 +1905,8 @@ def scan_records(
                 continue
             threshold_passed += 1
             if top_k is None:
+                if window is None:
+                    window = decode_indices_to_sequence(encoded_sequence[start : start + window_len])
                 record = {
                     "header": header,
                     "start": start + 1,
@@ -1888,6 +1947,8 @@ def scan_records(
                     )
                 continue
 
+            if window is None:
+                window = decode_indices_to_sequence(encoded_sequence[start : start + window_len])
             record = {
                 "header": header,
                 "start": start + 1,

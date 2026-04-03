@@ -130,3 +130,33 @@ def test_scan_records_fast_scan_matches_standard_scores():
         (hit["header"], hit["start"], hit["end"], hit["score"]) for hit in standard_hits
     ]
     assert all(hit["breakdown"] == [] for hit in fast_hits)
+
+
+def test_scan_records_fast_scan_skips_invalid_windows_like_standard():
+    profiles = [
+        make_profile(1, "E", {"L": -1.5}),
+        make_profile(2, "T", {"R": -2.0}),
+        make_profile(3, "S", {"L": -1.25}),
+    ]
+    records = [
+        (">mixed", "QQQLXRLQQQ"),
+    ]
+
+    standard_hits, standard_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=10,
+        alignment_mode="rigid",
+    )
+    fast_hits, fast_windows = db200k_scan.scan_records(
+        records,
+        profiles,
+        top_k=10,
+        alignment_mode="rigid",
+        fast_scan=True,
+    )
+
+    assert fast_windows == standard_windows
+    assert [(hit["start"], hit["end"], hit["window"], hit["score"]) for hit in fast_hits] == [
+        (hit["start"], hit["end"], hit["window"], hit["score"]) for hit in standard_hits
+    ]
