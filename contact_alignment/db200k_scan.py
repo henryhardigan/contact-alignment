@@ -334,6 +334,14 @@ class PositionProfile:
 
 
 @dataclass(frozen=True)
+class ProfileResources:
+    index_5x5: dict[str, SequenceIndexEntry]
+    index_3x3: dict[str, SequenceIndexEntry]
+    index_3x3_encoded: dict[int, SequenceIndexEntry]
+    index_1x1: dict[str, SequenceIndexEntry]
+
+
+@dataclass(frozen=True)
 class AlignmentResult:
     score: float
     breakdown: list[tuple[int, str, float]]
@@ -868,13 +876,13 @@ def _make_terminal_1x1_profile(
     index_1x1: dict[str, SequenceIndexEntry],
     *,
     rescue_index_3x3: dict[str, SequenceIndexEntry] | None = None,
+    rescue_index_3x3_encoded: dict[int, SequenceIndexEntry] | None = None,
 ) -> PositionProfile:
     if residue not in index_1x1:
         raise ValueError(f"No 1x1 DB200K support found for residue {residue}.")
     entry = index_1x1[residue]
-    rescue_index_3x3_encoded = (
-        _build_encoded_triplet_index(rescue_index_3x3) if rescue_index_3x3 is not None else None
-    )
+    if rescue_index_3x3_encoded is None and rescue_index_3x3 is not None:
+        rescue_index_3x3_encoded = _build_encoded_triplet_index(rescue_index_3x3)
     return PositionProfile(
         position=position,
         center_residue=residue,
@@ -900,44 +908,15 @@ def _make_terminal_1x1_profile(
     )
 
 
-def build_query_profiles(
-    query_seq: str,
+def load_profile_resources(
     db_root: str | Path,
     *,
     profile_strategy: str = "hierarchical_5x5_3x3_1x1",
     one_by_one_mode: str = "directed",
     one_by_one_matrix_tsv: str | Path | None = None,
-    strong_threshold: int = 100,
-    strong_weight_3x3: float = 0.8,
-    weak_weight_3x3: float = 0.5,
-    shrinkage_prior_3x3: float = 25.0,
-    shrinkage_prior_5x5: float = 10.0,
     cache_dir: str | Path | None = None,
     rebuild_cache: bool = False,
-) -> list[PositionProfile]:
-    """Builds DB200K partner profiles across the full query length.
-
-    Terminal query residues are always represented by 1x1-only profiles, while
-    interior positions use the selected 5x5/3x3/1x1 strategy.
-    """
-    query_seq = query_seq.upper()
-    if not query_seq:
-        raise ValueError("query_seq must be non-empty.")
-    invalid = sorted(set(query_seq) - CENTER_ALPHABET_SET)
-    if invalid:
-        raise ValueError(f"Unsupported residues in query_seq: {''.join(invalid)}")
-    if profile_strategy not in PROFILE_STRATEGIES:
-        raise ValueError(f"Unsupported profile_strategy: {profile_strategy}")
-    if one_by_one_mode not in ONE_BY_ONE_MODES:
-        raise ValueError(f"Unsupported one_by_one_mode: {one_by_one_mode}")
-
-    triplets = [query_seq[i : i + 3] for i in range(len(query_seq) - 2)]
-    pentapeptides = [
-        query_seq[i - 2 : i + 3] if 2 <= i <= len(query_seq) - 3 else None
-        for i in range(1, len(query_seq) - 1)
-    ]
-    center_residues = sorted({triplet[1] for triplet in triplets})
-
+) -> ProfileResources:
     index_5x5 = {}
     if profile_strategy in {
         "shrinkage_5x5_3x3_1x1",
@@ -956,7 +935,6 @@ def build_query_profiles(
         cache_dir=cache_dir,
         rebuild=rebuild_cache,
     )
-    index_3x3_encoded = _build_encoded_triplet_index(index_3x3)
     index_1x1 = load_one_by_one_index(
         db_root,
         cache_dir=cache_dir,
@@ -964,21 +942,76 @@ def build_query_profiles(
         one_by_one_mode=one_by_one_mode,
         one_by_one_matrix_tsv=one_by_one_matrix_tsv,
     )
+    return ProfileResources(
+        index_5x5=index_5x5,
+        index_3x3=index_3x3,
+        index_3x3_encoded=_build_encoded_triplet_index(index_3x3),
+        index_1x1=index_1x1,
+    )
+
+
+def build_query_profiles_from_resources(
+    query_seq: str,
+    resources: ProfileResources,
+    *,
+    profile_strategy: str = "hierarchical_5x5_3x3_1x1",
+    strong_threshold: int = 100,
+    strong_weight_3x3: float = 0.8,
+    weak_weight_3x3: float = 0.5,
+    shrinkage_prior_3x3: float = 25.0,
+    shrinkage_prior_5x5: float = 10.0,
+) -> list[PositionProfile]:
+    query_seq = query_seq.upper()
+    if not query_seq:
+        raise ValueError("query_seq must be non-empty.")
+    invalid = sorted(set(query_seq) - CENTER_ALPHABET_SET)
+    if invalid:
+        raise ValueError(f"Unsupported residues in query_seq: {''.join(invalid)}")
+    if profile_strategy not in PROFILE_STRATEGIES:
+        raise ValueError(f"Unsupported profile_strategy: {profile_strategy}")
+
+    triplets = [query_seq[i : i + 3] for i in range(len(query_seq) - 2)]
+    pentapeptides = [
+        query_seq[i - 2 : i + 3] if 2 <= i <= len(query_seq) - 3 else None
+        for i in range(1, len(query_seq) - 1)
+    ]
+    center_residues = sorted({triplet[1] for triplet in triplets})
     if len(query_seq) == 1:
-        return [_make_terminal_1x1_profile(1, query_seq[0], index_1x1, rescue_index_3x3=index_3x3)]
+        return [
+            _make_terminal_1x1_profile(
+                1,
+                query_seq[0],
+                resources.index_1x1,
+                rescue_index_3x3=resources.index_3x3,
+                rescue_index_3x3_encoded=resources.index_3x3_encoded,
+            )
+        ]
+
     stats_5x5 = {
-        pentapeptide: index_5x5[pentapeptide]
+        pentapeptide: resources.index_5x5[pentapeptide]
         for pentapeptide in set(p for p in pentapeptides if p is not None)
-        if pentapeptide in index_5x5
+        if pentapeptide in resources.index_5x5
     }
-    stats_3x3 = {triplet: index_3x3[triplet] for triplet in set(triplets) if triplet in index_3x3}
+    stats_3x3 = {
+        triplet: resources.index_3x3[triplet]
+        for triplet in set(triplets)
+        if triplet in resources.index_3x3
+    }
     stats_1x1 = {
-        residue: index_1x1[residue]
+        residue: resources.index_1x1[residue]
         for residue in center_residues
-        if residue in index_1x1
+        if residue in resources.index_1x1
     }
 
-    profiles = [_make_terminal_1x1_profile(1, query_seq[0], index_1x1, rescue_index_3x3=index_3x3)]
+    profiles = [
+        _make_terminal_1x1_profile(
+            1,
+            query_seq[0],
+            resources.index_1x1,
+            rescue_index_3x3=resources.index_3x3,
+            rescue_index_3x3_encoded=resources.index_3x3_encoded,
+        )
+    ]
     for i, triplet in enumerate(triplets, start=2):
         center_residue = triplet[1]
         if profile_strategy in {"blend_3x3_1x1", "shrinkage_5x5_3x3_1x1"} and center_residue not in stats_1x1:
@@ -1010,26 +1043,32 @@ def build_query_profiles(
                 matched_5x5 = [
                     candidate
                     for candidate in _iter_center_fixed_grantham50_degenerate_pentapeptides(pentapeptide)
-                    if candidate in index_5x5
+                    if candidate in resources.index_5x5
                 ]
                 if matched_5x5:
-                    count_5x5 = sum(index_5x5[candidate].count for candidate in matched_5x5)
+                    count_5x5 = sum(resources.index_5x5[candidate].count for candidate in matched_5x5)
                     row_5x5 = sum(
-                        index_5x5[candidate].count * index_5x5[candidate].mean for candidate in matched_5x5
+                        resources.index_5x5[candidate].count * resources.index_5x5[candidate].mean
+                        for candidate in matched_5x5
                     ) / count_5x5
                     std_5x5 = onp.sqrt(
                         onp.maximum(
                             sum(
-                                index_5x5[candidate].count * (
-                                    onp.square(index_5x5[candidate].std) + onp.square(index_5x5[candidate].mean)
+                                resources.index_5x5[candidate].count
+                                * (
+                                    onp.square(resources.index_5x5[candidate].std)
+                                    + onp.square(resources.index_5x5[candidate].mean)
                                 )
                                 for candidate in matched_5x5
-                            ) / count_5x5
+                            )
+                            / count_5x5
                             - onp.square(row_5x5),
                             0.0,
                         )
                     )
-                    geometry_buckets_5x5 = sum(index_5x5[candidate].geometry_bucket_count for candidate in matched_5x5)
+                    geometry_buckets_5x5 = sum(
+                        resources.index_5x5[candidate].geometry_bucket_count for candidate in matched_5x5
+                    )
         count_3x3 = 0
         row_3x3 = None
         std_3x3 = onp.zeros(CENTER_ALPHABET_SIZE, dtype=onp.float64)
@@ -1152,8 +1191,8 @@ def build_query_profiles(
                 effective_support=effective_support,
                 allows_charge_rescue=center_residue in OFFSET_CHARGE_RESCUE_PAIRS,
                 allows_aromatic_proline_rescue=center_residue in AROMATIC_PROLINE_DIPEPTIDE_RESCUE_RESIDUES,
-                rescue_index_3x3=index_3x3,
-                rescue_index_3x3_encoded=index_3x3_encoded,
+                rescue_index_3x3=resources.index_3x3,
+                rescue_index_3x3_encoded=resources.index_3x3_encoded,
             )
         )
 
@@ -1161,11 +1200,62 @@ def build_query_profiles(
         _make_terminal_1x1_profile(
             len(query_seq),
             query_seq[-1],
-            index_1x1,
-            rescue_index_3x3=index_3x3,
+            resources.index_1x1,
+            rescue_index_3x3=resources.index_3x3,
+            rescue_index_3x3_encoded=resources.index_3x3_encoded,
         )
     )
     return profiles
+
+
+def build_query_profiles(
+    query_seq: str,
+    db_root: str | Path,
+    *,
+    profile_strategy: str = "hierarchical_5x5_3x3_1x1",
+    one_by_one_mode: str = "directed",
+    one_by_one_matrix_tsv: str | Path | None = None,
+    strong_threshold: int = 100,
+    strong_weight_3x3: float = 0.8,
+    weak_weight_3x3: float = 0.5,
+    shrinkage_prior_3x3: float = 25.0,
+    shrinkage_prior_5x5: float = 10.0,
+    cache_dir: str | Path | None = None,
+    rebuild_cache: bool = False,
+) -> list[PositionProfile]:
+    """Builds DB200K partner profiles across the full query length.
+
+    Terminal query residues are always represented by 1x1-only profiles, while
+    interior positions use the selected 5x5/3x3/1x1 strategy.
+    """
+    query_seq = query_seq.upper()
+    if not query_seq:
+        raise ValueError("query_seq must be non-empty.")
+    invalid = sorted(set(query_seq) - CENTER_ALPHABET_SET)
+    if invalid:
+        raise ValueError(f"Unsupported residues in query_seq: {''.join(invalid)}")
+    if profile_strategy not in PROFILE_STRATEGIES:
+        raise ValueError(f"Unsupported profile_strategy: {profile_strategy}")
+    if one_by_one_mode not in ONE_BY_ONE_MODES:
+        raise ValueError(f"Unsupported one_by_one_mode: {one_by_one_mode}")
+    resources = load_profile_resources(
+        db_root,
+        profile_strategy=profile_strategy,
+        one_by_one_mode=one_by_one_mode,
+        one_by_one_matrix_tsv=one_by_one_matrix_tsv,
+        cache_dir=cache_dir,
+        rebuild_cache=rebuild_cache,
+    )
+    return build_query_profiles_from_resources(
+        query_seq,
+        resources,
+        profile_strategy=profile_strategy,
+        strong_threshold=strong_threshold,
+        strong_weight_3x3=strong_weight_3x3,
+        weak_weight_3x3=weak_weight_3x3,
+        shrinkage_prior_3x3=shrinkage_prior_3x3,
+        shrinkage_prior_5x5=shrinkage_prior_5x5,
+    )
 
 
 def score_window(

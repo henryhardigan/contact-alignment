@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from contact_alignment import db200k_scan
+from contact_alignment import db200k_scan, design
 
 
 def make_profile(
@@ -268,3 +268,42 @@ def test_scan_records_zero_progress_interval_is_treated_as_disabled():
 
     assert windows_scanned == 7
     assert hits[0]["window"] == "LRL"
+
+
+def test_beam_sample_favored_sequences_prefers_best_direct_choices():
+    profiles = [
+        make_profile(1, "A", {"L": -2.0, "V": -1.0}),
+        make_profile(2, "A", {"R": -3.0, "K": -0.5}),
+    ]
+
+    candidates = design.beam_sample_favored_sequences(profiles, top_n=2, beam_width=4)
+
+    assert candidates[0] == ("LR", -5.0)
+    assert ("VK", -1.5) in candidates
+
+
+def test_build_query_profiles_from_resources_matches_direct_builder():
+    db_root = "/Users/henryhardigan/Downloads/pisces-cache-scaac"
+    query_seq = "ETSEAKGPDGMALPRPR"
+
+    resources = db200k_scan.load_profile_resources(
+        db_root,
+        profile_strategy="blend_3x3_1x1",
+    )
+    direct = db200k_scan.build_query_profiles(
+        query_seq,
+        db_root,
+        profile_strategy="blend_3x3_1x1",
+    )
+    reused = db200k_scan.build_query_profiles_from_resources(
+        query_seq,
+        resources,
+        profile_strategy="blend_3x3_1x1",
+    )
+
+    assert len(reused) == len(direct)
+    for left, right in zip(reused, direct):
+        assert left.position == right.position
+        assert left.center_residue == right.center_residue
+        assert left.support_mode == right.support_mode
+        assert np.array_equal(left.energies, right.energies)
