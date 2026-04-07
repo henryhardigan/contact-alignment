@@ -45,7 +45,13 @@ def make_profile(
     )
 
 
-def test_shared_donor_rescue_marks_second_claim_with_asterisk():
+def test_rescue_improves_center_without_zeroing_donor():
+    # R-profile at positions 0 and 2, A-profile at position 1.
+    # Window "AEA": A at pos 0 and 2 score 1.0 (unfavorable); E at pos 1 scores 0.5.
+    # R-profiles allow rescue from D/E neighbors. E at pos 1 is a valid donor for pos 0.
+    # Pos 0 rescues: center → -2.0 (E in R-profile). E@1 marked consumed, keeps its 0.5 score.
+    # Pos 1 is consumed (was claimed as donor) → skipped as rescue center.
+    # Pos 2 tries rescue: only neighbor is E@1 (consumed) → no rescue fires.
     profiles = [
         make_profile(1, "R", {"A": 1.0, "E": -2.0}),
         make_profile(2, "A", {"E": 0.5}),
@@ -54,11 +60,11 @@ def test_shared_donor_rescue_marks_second_claim_with_asterisk():
 
     score, breakdown, donor_indices = db200k_scan.score_window_with_donor_trace("AEA", profiles)
 
-    assert score == -2.7
+    assert score == pytest.approx(-0.5)
     assert breakdown[0] == (1, "A<-E@2", -2.0)
-    assert breakdown[1] == (2, "E", 0.0)
-    assert breakdown[2] == (3, "A<-E@2*", -0.7)
-    assert donor_indices == [1, 1, 1]
+    assert breakdown[1] == (2, "E", 0.5)
+    assert breakdown[2] == (3, "A", 1.0)
+    assert donor_indices == [1, 1, 2]
 
 
 def test_score_window_fast_matches_traced_score():

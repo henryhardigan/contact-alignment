@@ -58,7 +58,6 @@ RESCUE_ALLOWED_MATRIX = tuple(
 )
 SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT = 0.35
 SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER = 1.5
-SHARED_DONOR_RESCUE_WEIGHT = 0.35
 NUMBA_RESCUE_SENTINEL = 1.0e6
 GRANTHAM_DIST = {
     ("A","C"):195,("A","D"):126,("A","E"):107,("A","F"):113,("A","G"):60,("A","H"):86,("A","I"):94,("A","K"):106,("A","L"):96,("A","M"):84,("A","N"):111,("A","P"):27,("A","Q"):91,("A","R"):112,("A","S"):99,("A","T"):58,("A","V"):64,("A","W"):148,("A","Y"):112,
@@ -168,7 +167,6 @@ if NUMBA_AVAILABLE:  # pragma: no branch
             return total
 
         consumed = onp.zeros(window_len, dtype=onp.uint8)
-        donor_claims = onp.zeros(window_len, dtype=onp.uint8)
 
         for rescue_pos_idx in range(rescue_positions.shape[0]):
             idx = int(rescue_positions[rescue_pos_idx])
@@ -180,7 +178,6 @@ if NUMBA_AVAILABLE:  # pragma: no branch
             best_delta = 0.0
             best_neighbor = -1
             best_rescued = 0.0
-            best_shared = False
 
             second_found = False
             second_delta = 0.0
@@ -190,11 +187,8 @@ if NUMBA_AVAILABLE:  # pragma: no branch
             for neighbor_idx in (idx - 1, idx + 1):
                 if neighbor_idx < 0 or neighbor_idx >= window_len:
                     continue
-                shared = False
                 if consumed[neighbor_idx] != 0:
-                    if allow_charge[idx] == 0 or donor_claims[neighbor_idx] >= 2:
-                        continue
-                    shared = True
+                    continue
 
                 neighbor_residue_idx = int(sequence_indices[window_start + neighbor_idx])
                 if rescue_allowed[int(center_indices[idx]), neighbor_residue_idx] == 0:
@@ -216,36 +210,21 @@ if NUMBA_AVAILABLE:  # pragma: no branch
                     candidate_energy = energies[idx, neighbor_residue_idx]
                 if candidate_energy < rescued_energy:
                     rescued_energy = candidate_energy
-                if shared:
-                    shared_energy = SHARED_DONOR_RESCUE_WEIGHT * rescued_energy
-                    if shared_energy < direct_energy:
-                        rescued_energy = shared_energy
-                    else:
-                        rescued_energy = direct_energy
-                    donor_energy = 0.0
-                else:
-                    donor_energy = adjusted[neighbor_idx]
 
-                improvement = (direct_energy + donor_energy) - rescued_energy
+                improvement = direct_energy - rescued_energy
                 if improvement <= 0.0:
                     continue
 
-                delta = rescued_energy - (direct_energy + donor_energy)
+                delta = rescued_energy - direct_energy
                 better = (
                     (not best_found)
                     or (delta < best_delta)
                     or (delta == best_delta and rescued_energy < best_rescued)
                     or (delta == best_delta and rescued_energy == best_rescued and neighbor_idx < best_neighbor)
-                    or (
-                        delta == best_delta
-                        and rescued_energy == best_rescued
-                        and neighbor_idx == best_neighbor
-                        and (0 if not shared else 1) < (0 if not best_shared else 1)
-                    )
                 )
 
                 if better:
-                    if best_found and not best_shared:
+                    if best_found:
                         second_found = True
                         second_delta = best_delta
                         second_neighbor = best_neighbor
@@ -254,8 +233,7 @@ if NUMBA_AVAILABLE:  # pragma: no branch
                     best_delta = delta
                     best_neighbor = neighbor_idx
                     best_rescued = rescued_energy
-                    best_shared = shared
-                elif (not shared) and (
+                elif (
                     (not second_found)
                     or (delta < second_delta)
                     or (delta == second_delta and rescued_energy < second_rescued)
@@ -273,7 +251,7 @@ if NUMBA_AVAILABLE:  # pragma: no branch
             donor1 = best_neighbor
             donor2 = -1
 
-            if allow_charge[idx] != 0 and (not best_shared) and second_found and second_rescued < 0.0:
+            if allow_charge[idx] != 0 and second_found and second_rescued < 0.0:
                 combined_energy = best_rescued + (SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT * second_rescued)
                 combined_cap = SECONDARY_OFFSET_CHARGE_RESCUE_CAP_MULTIPLIER * best_rescued
                 if combined_energy < combined_cap:
@@ -283,15 +261,9 @@ if NUMBA_AVAILABLE:  # pragma: no branch
                     donor2 = second_neighbor
 
             adjusted[idx] = center_energy
-            donor_claims[donor1] += 1
-            if consumed[donor1] == 0:
-                consumed[donor1] = 1
-                adjusted[donor1] = 0.0
+            consumed[donor1] = 1
             if donor2 >= 0:
-                donor_claims[donor2] += 1
-                if consumed[donor2] == 0:
-                    consumed[donor2] = 1
-                    adjusted[donor2] = 0.0
+                consumed[donor2] = 1
 
         total = 0.0
         for idx in range(window_len):
@@ -1520,26 +1492,18 @@ def _apply_offset_neighbor_rescue_fast_at(
         return sum(adjusted)
 
     consumed_donor_indices: set[int] = set()
-    donor_claims: dict[int, list[int]] = defaultdict(list)
     for idx in rescue_positions:
         profile = profiles[idx]
         if idx in consumed_donor_indices:
             continue
         direct_energy = adjusted[idx]
-        rescue_candidates: list[tuple[float, float, int, float, bool]] = []
+        rescue_candidates: list[tuple[float, float, int, float]] = []
         for neighbor_idx in (idx - 1, idx + 1):
             if neighbor_idx < 0 or neighbor_idx >= window_len:
                 continue
             absolute_neighbor_idx = window_start + neighbor_idx
-            shared_donor = False
             if neighbor_idx in consumed_donor_indices:
-                if (
-                    not profile.allows_charge_rescue
-                    or neighbor_idx not in donor_claims
-                    or len(donor_claims[neighbor_idx]) >= 2
-                ):
-                    continue
-                shared_donor = True
+                continue
             if not RESCUE_ALLOWED_MATRIX[profile.center_residue_index][sequence_indices[absolute_neighbor_idx]]:
                 continue
             contextual_rescue = None
@@ -1562,29 +1526,21 @@ def _apply_offset_neighbor_rescue_fast_at(
                     uncertainty_floor=uncertainty_floor,
                 ),
             )
-            if shared_donor:
-                rescued_energy = min(direct_energy, SHARED_DONOR_RESCUE_WEIGHT * rescued_energy)
-            donor_energy = 0.0 if shared_donor else adjusted[neighbor_idx]
-            improvement = (direct_energy + donor_energy) - rescued_energy
+            improvement = direct_energy - rescued_energy
             if improvement > 0.0:
-                delta = rescued_energy - (direct_energy + donor_energy)
-                rescue_candidates.append((delta, improvement, neighbor_idx, rescued_energy, shared_donor))
+                delta = rescued_energy - direct_energy
+                rescue_candidates.append((delta, improvement, neighbor_idx, rescued_energy))
 
         if not rescue_candidates:
             continue
 
-        rescue_candidates.sort(key=lambda item: (item[0], item[3], item[2], item[4]))
-        _, _, neighbor_idx, rescued_energy, primary_shared = rescue_candidates[0]
+        rescue_candidates.sort(key=lambda item: (item[0], item[3], item[2]))
+        _, _, neighbor_idx, rescued_energy = rescue_candidates[0]
         donors_to_consume = [neighbor_idx]
         center_energy = rescued_energy
 
-        if (
-            not primary_shared
-            and profile.allows_charge_rescue
-            and len(rescue_candidates) > 1
-            and not rescue_candidates[1][4]
-        ):
-            _, _, secondary_idx, secondary_rescued_energy, _ = rescue_candidates[1]
+        if profile.allows_charge_rescue and len(rescue_candidates) > 1:
+            _, _, secondary_idx, secondary_rescued_energy = rescue_candidates[1]
             if secondary_rescued_energy < 0.0:
                 combined_energy = rescued_energy + (
                     SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT * secondary_rescued_energy
@@ -1597,10 +1553,7 @@ def _apply_offset_neighbor_rescue_fast_at(
 
         adjusted[idx] = center_energy
         for donor_idx in donors_to_consume:
-            donor_claims[donor_idx].append(idx)
-            if donor_idx not in consumed_donor_indices:
-                consumed_donor_indices.add(donor_idx)
-                adjusted[donor_idx] = 0.0
+            consumed_donor_indices.add(donor_idx)
 
     return sum(adjusted)
 
@@ -1627,26 +1580,18 @@ def _apply_offset_neighbor_rescue_with_trace(
         return sum(entry[2] for entry in adjusted), adjusted, donor_indices
 
     consumed_donor_indices: set[int] = set()
-    donor_claims: dict[int, list[int]] = defaultdict(list)
     for idx in rescue_positions:
         profile = profiles[idx]
         if idx in consumed_donor_indices:
             continue
         direct_energy = adjusted[idx][2]
         direct_label = adjusted[idx][1]
-        rescue_candidates: list[tuple[float, float, int, float, bool]] = []
+        rescue_candidates: list[tuple[float, float, int, float]] = []
         for neighbor_idx in (idx - 1, idx + 1):
             if neighbor_idx < 0 or neighbor_idx >= len(window_seq):
                 continue
-            shared_donor = False
             if neighbor_idx in consumed_donor_indices:
-                if (
-                    not profile.allows_charge_rescue
-                    or neighbor_idx not in donor_claims
-                    or len(donor_claims[neighbor_idx]) >= 2
-                ):
-                    continue
-                shared_donor = True
+                continue
             if not _neighbor_rescue_allowed(profile.center_residue, window_seq[neighbor_idx]):
                 continue
             contextual_rescue = None
@@ -1667,30 +1612,22 @@ def _apply_offset_neighbor_rescue_with_trace(
                     uncertainty_floor=uncertainty_floor,
                 ),
             )
-            if shared_donor:
-                rescued_energy = min(direct_energy, SHARED_DONOR_RESCUE_WEIGHT * rescued_energy)
-            donor_energy = 0.0 if shared_donor else adjusted[neighbor_idx][2]
-            improvement = (direct_energy + donor_energy) - rescued_energy
+            improvement = direct_energy - rescued_energy
             if improvement > 0.0:
-                delta = rescued_energy - (direct_energy + donor_energy)
-                rescue_candidates.append((delta, improvement, neighbor_idx, rescued_energy, shared_donor))
+                delta = rescued_energy - direct_energy
+                rescue_candidates.append((delta, improvement, neighbor_idx, rescued_energy))
 
         if not rescue_candidates:
             continue
 
-        rescue_candidates.sort(key=lambda item: (item[0], item[3], item[2], item[4]))
-        _, _, neighbor_idx, rescued_energy, primary_shared = rescue_candidates[0]
+        rescue_candidates.sort(key=lambda item: (item[0], item[3], item[2]))
+        _, _, neighbor_idx, rescued_energy = rescue_candidates[0]
         rescue_label = direct_label
         donors_to_consume = [neighbor_idx]
         center_energy = rescued_energy
 
-        if (
-            not primary_shared
-            and profile.allows_charge_rescue
-            and len(rescue_candidates) > 1
-            and not rescue_candidates[1][4]
-        ):
-            _, _, secondary_idx, secondary_rescued_energy, _ = rescue_candidates[1]
+        if profile.allows_charge_rescue and len(rescue_candidates) > 1:
+            _, _, secondary_idx, secondary_rescued_energy = rescue_candidates[1]
             if secondary_rescued_energy < 0.0:
                 combined_energy = rescued_energy + (
                     SECONDARY_OFFSET_CHARGE_RESCUE_WEIGHT * secondary_rescued_energy
@@ -1704,22 +1641,13 @@ def _apply_offset_neighbor_rescue_with_trace(
         if window_seq[neighbor_idx] != direct_label or rescued_energy < direct_energy:
             if len(donors_to_consume) == 1:
                 rescue_label = f"{_format_rescued_breakdown_label(direct_label, window_seq[neighbor_idx])}@{neighbor_idx+1}"
-                if primary_shared:
-                    rescue_label += "*"
             else:
                 donor_labels = ",".join(f"{window_seq[donor]}@{donor+1}" for donor in donors_to_consume)
                 rescue_label = f"{direct_label}<-{donor_labels}"
         adjusted[idx] = (adjusted[idx][0], rescue_label, center_energy)
         donor_indices[idx] = neighbor_idx
         for donor_idx in donors_to_consume:
-            donor_claims[donor_idx].append(idx)
-            if donor_idx not in consumed_donor_indices:
-                consumed_donor_indices.add(donor_idx)
-                adjusted[donor_idx] = (
-                    adjusted[donor_idx][0],
-                    adjusted[donor_idx][1],
-                    0.0,
-                )
+            consumed_donor_indices.add(donor_idx)
 
     return sum(entry[2] for entry in adjusted), adjusted, donor_indices
 
