@@ -23,7 +23,6 @@ except Exception:  # pragma: no cover - optional accelerator fallback
     NUMBA_AVAILABLE = False
 
 
-THREE_TO_ONE = {three.upper(): one for one, three in residues.RES_CODE.items()}
 CENTER_ALPHABET = residues.RES_ALPHA
 CENTER_ALPHABET_SET = set(CENTER_ALPHABET)
 RESIDUE_INDEX = {residue: idx for idx, residue in enumerate(CENTER_ALPHABET)}
@@ -382,9 +381,9 @@ def _load_fragment_chain_data(pdb_path: str | Path) -> dict[str, tuple[str, onp.
             continue
         seen.add(key)
         resname = line[17:20].strip().upper()
-        if resname not in THREE_TO_ONE:
+        if resname not in db200k.THREE_TO_ONE:
             raise ValueError(f"Unsupported residue in DB200K fragment: {resname}")
-        residues_by_chain.setdefault(chain, []).append(THREE_TO_ONE[resname])
+        residues_by_chain.setdefault(chain, []).append(db200k.THREE_TO_ONE[resname])
         coords_by_chain.setdefault(chain, []).append(
             (
                 float(line[30:38]),
@@ -729,7 +728,7 @@ def _build_reciprocal_1x1_index(
             reverse_entry = directed_index_1x1[target]
             reverse_row = reverse_entry.mean
             reverse_var = onp.square(reverse_entry.std)
-            reverse_idx = CENTER_ALPHABET.index(source)
+            reverse_idx = RESIDUE_INDEX[source]
             total = float(source_row[target_idx]) + float(reverse_row[reverse_idx])
             total_var = float(source_var[target_idx]) + float(reverse_var[reverse_idx])
             if metric == "sum":
@@ -1258,6 +1257,29 @@ def build_query_profiles(
     )
 
 
+def _build_window_breakdown(
+    window_seq: str,
+    profiles: list[PositionProfile],
+    *,
+    score_mode: str,
+    uncertainty_floor: float,
+) -> list[tuple[int, str, float]]:
+    residue_index = RESIDUE_INDEX.__getitem__
+    return [
+        (
+            profile.position,
+            residue,
+            _score_profile_residue_indexed(
+                profile,
+                residue_index(residue),
+                score_mode=score_mode,
+                uncertainty_floor=uncertainty_floor,
+            ),
+        )
+        for residue, profile in zip(window_seq, profiles)
+    ]
+
+
 def score_window(
     window_seq: str,
     profiles: list[PositionProfile],
@@ -1274,24 +1296,13 @@ def score_window(
     if rescue_mode not in RESCUE_MODES:
         raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
 
-    breakdown = []
-    residue_index = RESIDUE_INDEX.__getitem__
-    for residue, profile in zip(window_seq, profiles):
-        energy = _score_profile_residue_indexed(
-            profile,
-            residue_index(residue),
-            score_mode=score_mode,
-            uncertainty_floor=uncertainty_floor,
-        )
-        breakdown.append((profile.position, residue, energy))
+    breakdown = _build_window_breakdown(
+        window_seq, profiles, score_mode=score_mode, uncertainty_floor=uncertainty_floor
+    )
     if rescue_mode == "none":
         return sum(entry[2] for entry in breakdown), breakdown
     total, adjusted, _ = _apply_offset_neighbor_rescue_with_trace(
-        window_seq,
-        profiles,
-        breakdown,
-        score_mode=score_mode,
-        uncertainty_floor=uncertainty_floor,
+        window_seq, profiles, breakdown, score_mode=score_mode, uncertainty_floor=uncertainty_floor,
     )
     return total, adjusted
 
@@ -1379,24 +1390,13 @@ def score_window_with_donor_trace(
     if rescue_mode not in RESCUE_MODES:
         raise ValueError(f"Unsupported rescue_mode: {rescue_mode}")
 
-    breakdown = []
-    residue_index = RESIDUE_INDEX.__getitem__
-    for residue, profile in zip(window_seq, profiles):
-        energy = _score_profile_residue_indexed(
-            profile,
-            residue_index(residue),
-            score_mode=score_mode,
-            uncertainty_floor=uncertainty_floor,
-        )
-        breakdown.append((profile.position, residue, energy))
+    breakdown = _build_window_breakdown(
+        window_seq, profiles, score_mode=score_mode, uncertainty_floor=uncertainty_floor
+    )
     if rescue_mode == "none":
         return sum(entry[2] for entry in breakdown), breakdown, list(range(len(window_seq)))
     return _apply_offset_neighbor_rescue_with_trace(
-        window_seq,
-        profiles,
-        breakdown,
-        score_mode=score_mode,
-        uncertainty_floor=uncertainty_floor,
+        window_seq, profiles, breakdown, score_mode=score_mode, uncertainty_floor=uncertainty_floor,
     )
 
 
@@ -1496,24 +1496,6 @@ def _score_charge_rescue_with_target_centered_3x3_fast_at(
     if target_entry is None:
         return None
     return float(target_entry.mean[profile.center_residue_index])
-
-
-def _apply_offset_neighbor_rescue(
-    window_seq: str,
-    profiles: list[PositionProfile],
-    breakdown: list[tuple[int, str, float]],
-    *,
-    score_mode: str = "raw",
-    uncertainty_floor: float = 1.0,
-) -> tuple[float, list[tuple[int, str, float]]]:
-    total, adjusted, _ = _apply_offset_neighbor_rescue_with_trace(
-        window_seq,
-        profiles,
-        breakdown,
-        score_mode=score_mode,
-        uncertainty_floor=uncertainty_floor,
-    )
-    return total, adjusted
 
 
 def _apply_offset_neighbor_rescue_fast_at(
@@ -1665,8 +1647,6 @@ def _apply_offset_neighbor_rescue_with_trace(
                 ):
                     continue
                 shared_donor = True
-            if not shared_donor and neighbor_idx in consumed_donor_indices:
-                continue
             if not _neighbor_rescue_allowed(profile.center_residue, window_seq[neighbor_idx]):
                 continue
             contextual_rescue = None
@@ -2119,6 +2099,17 @@ def scan_records(
     scored_windows = 0
     threshold_passed = 0
     window_len = len(profiles)
+
+    def _maybe_log_progress() -> None:
+        if progress_every_windows is not None and windows_scanned % progress_every_windows == 0:
+            label = progress_label or "scan"
+            print(
+                f"[{label}] windows={windows_scanned} "
+                f"prefilter_passed={prefilter_passed} "
+                f"scored={scored_windows} "
+                f"hits={threshold_passed}",
+                flush=True,
+            )
     numba_pack_score = None
     numba_pack_prefilter = None
     if (
@@ -2184,18 +2175,7 @@ def scan_records(
                         uncertainty_floor=uncertainty_floor,
                     )
                 if prefilter_result[0] > prefilter_score_threshold:
-                    if (
-                        progress_every_windows is not None
-                        and windows_scanned % progress_every_windows == 0
-                    ):
-                        label = progress_label or "scan"
-                        print(
-                            f"[{label}] windows={windows_scanned} "
-                            f"prefilter_passed={prefilter_passed} "
-                            f"scored={scored_windows} "
-                            f"hits={threshold_passed}",
-                            flush=True,
-                        )
+                    _maybe_log_progress()
                     continue
                 prefilter_passed += 1
             if alignment_mode == "rigid":
@@ -2251,63 +2231,12 @@ def scan_records(
                 breakdown = alignment.breakdown
             scored_windows += 1
             if score_threshold is not None and score > score_threshold:
-                if (
-                    progress_every_windows is not None
-                    and windows_scanned % progress_every_windows == 0
-                ):
-                    label = progress_label or "scan"
-                    print(
-                        f"[{label}] windows={windows_scanned} "
-                        f"prefilter_passed={prefilter_passed} "
-                        f"scored={scored_windows} "
-                        f"hits={threshold_passed}",
-                        flush=True,
-                    )
+                _maybe_log_progress()
                 continue
             threshold_passed += 1
-            if top_k is None:
-                if window is None:
-                    window = decode_indices_to_sequence(encoded_sequence[start : start + window_len])
-                record = {
-                    "header": header,
-                    "start": start + 1,
-                    "end": start + window_len,
-                    "window": window,
-                    "score": score,
-                    "breakdown": breakdown,
-                }
-                if alignment is not None:
-                    record["alignment"] = alignment
-                records.append(record)
-                if (
-                    progress_every_windows is not None
-                    and windows_scanned % progress_every_windows == 0
-                ):
-                    label = progress_label or "scan"
-                    print(
-                        f"[{label}] windows={windows_scanned} "
-                        f"prefilter_passed={prefilter_passed} "
-                        f"scored={scored_windows} "
-                        f"hits={threshold_passed}",
-                        flush=True,
-                    )
+            if top_k is not None and len(records) >= top_k and -score <= records[0][0]:
+                _maybe_log_progress()
                 continue
-
-            if len(records) >= top_k and -score <= records[0][0]:
-                if (
-                    progress_every_windows is not None
-                    and windows_scanned % progress_every_windows == 0
-                ):
-                    label = progress_label or "scan"
-                    print(
-                        f"[{label}] windows={windows_scanned} "
-                        f"prefilter_passed={prefilter_passed} "
-                        f"scored={scored_windows} "
-                        f"hits={threshold_passed}",
-                        flush=True,
-                    )
-                continue
-
             if window is None:
                 window = decode_indices_to_sequence(encoded_sequence[start : start + window_len])
             record = {
@@ -2320,24 +2249,16 @@ def scan_records(
             }
             if alignment is not None:
                 record["alignment"] = alignment
-            heap_entry = (-score, entry_idx, record)
-            entry_idx += 1
-            if len(records) < top_k:
-                heapq.heappush(records, heap_entry)
-            elif heap_entry[0] > records[0][0]:
-                heapq.heapreplace(records, heap_entry)
-            if (
-                progress_every_windows is not None
-                and windows_scanned % progress_every_windows == 0
-            ):
-                label = progress_label or "scan"
-                print(
-                    f"[{label}] windows={windows_scanned} "
-                    f"prefilter_passed={prefilter_passed} "
-                    f"scored={scored_windows} "
-                    f"hits={threshold_passed}",
-                    flush=True,
-                )
+            if top_k is None:
+                records.append(record)
+            else:
+                heap_entry = (-score, entry_idx, record)
+                entry_idx += 1
+                if len(records) < top_k:
+                    heapq.heappush(records, heap_entry)
+                elif heap_entry[0] > records[0][0]:
+                    heapq.heapreplace(records, heap_entry)
+            _maybe_log_progress()
 
     if stats is not None:
         stats.clear()

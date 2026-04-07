@@ -71,66 +71,7 @@ def parse_args() -> argparse.Namespace:
         default=500000,
         help="Print progress every N scanned windows.",
     )
-    parser.add_argument(
-        "--surface-weight",
-        type=float,
-        default=0.25,
-    )
-    parser.add_argument(
-        "--flexibility-weight",
-        type=float,
-        default=0.20,
-    )
-    parser.add_argument(
-        "--polar-weight",
-        type=float,
-        default=0.10,
-    )
-    parser.add_argument(
-        "--gp-weight",
-        type=float,
-        default=0.25,
-    )
-    parser.add_argument(
-        "--hydrophobe-penalty",
-        type=float,
-        default=0.15,
-    )
-    parser.add_argument(
-        "--complexity-weight",
-        type=float,
-        default=0.30,
-    )
-    parser.add_argument(
-        "--transition-weight",
-        type=float,
-        default=0.20,
-    )
-    parser.add_argument(
-        "--repeat-penalty",
-        type=float,
-        default=0.40,
-    )
-    parser.add_argument(
-        "--acidic-run-penalty",
-        type=float,
-        default=0.60,
-    )
-    parser.add_argument(
-        "--basic-run-penalty",
-        type=float,
-        default=0.55,
-    )
-    parser.add_argument(
-        "--charged-run-penalty",
-        type=float,
-        default=0.90,
-    )
-    parser.add_argument(
-        "--acidic-excess-penalty",
-        type=float,
-        default=0.80,
-    )
+    _db200k_cli.add_bonus_args(parser)
     return parser.parse_args()
 
 
@@ -152,21 +93,7 @@ def parse_targets(args: argparse.Namespace, profiles) -> list[TargetWindow]:
             score_mode=args.score_mode,
             uncertainty_floor=args.uncertainty_floor,
         )
-        seq_bonus, _ = compute_sequence_bonus(
-            seq,
-            surface_weight=args.surface_weight,
-            flexibility_weight=args.flexibility_weight,
-            polar_weight=args.polar_weight,
-            gp_weight=args.gp_weight,
-            hydrophobe_penalty=args.hydrophobe_penalty,
-            complexity_weight=args.complexity_weight,
-            transition_weight=args.transition_weight,
-            repeat_penalty=args.repeat_penalty,
-            acidic_run_penalty=args.acidic_run_penalty,
-            basic_run_penalty=args.basic_run_penalty,
-            charged_run_penalty=args.charged_run_penalty,
-            acidic_excess_penalty=args.acidic_excess_penalty,
-        )
+        seq_bonus, _ = compute_sequence_bonus(seq, **_db200k_cli.bonus_kwargs_from_args(args))
         targets.append(
             TargetWindow(
                 label=label,
@@ -202,21 +129,7 @@ def main() -> None:
                 score_mode=args.score_mode,
                 uncertainty_floor=args.uncertainty_floor,
             )
-            seq_bonus, _ = compute_sequence_bonus(
-                window,
-                surface_weight=args.surface_weight,
-                flexibility_weight=args.flexibility_weight,
-                polar_weight=args.polar_weight,
-                gp_weight=args.gp_weight,
-                hydrophobe_penalty=args.hydrophobe_penalty,
-                complexity_weight=args.complexity_weight,
-                transition_weight=args.transition_weight,
-                repeat_penalty=args.repeat_penalty,
-                acidic_run_penalty=args.acidic_run_penalty,
-                basic_run_penalty=args.basic_run_penalty,
-                charged_run_penalty=args.charged_run_penalty,
-                acidic_excess_penalty=args.acidic_excess_penalty,
-            )
+            seq_bonus, _ = compute_sequence_bonus(window, **_db200k_cli.bonus_kwargs_from_args(args))
             final_score = db200k_score - seq_bonus
             if entry_best is None or final_score < entry_best:
                 entry_best = final_score
@@ -280,17 +193,16 @@ def main() -> None:
             }
         )
 
-    writer = csv.DictWriter(sys.stdout, fieldnames=fields, delimiter="\t")
-    writer.writeheader()
-    for row in rows:
-        writer.writerow(row)
+    def _write_rows(handle) -> None:
+        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
+    _write_rows(sys.stdout)
     if args.out:
         with open(args.out, "w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
+            _write_rows(handle)
 
 
 if __name__ == "__main__":
