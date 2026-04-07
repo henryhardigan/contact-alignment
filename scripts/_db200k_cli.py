@@ -127,6 +127,50 @@ def add_alignment_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_bonus_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--surface-weight", type=float, default=0.25,
+                        help="Weight for sequence accessibility proxy.")
+    parser.add_argument("--flexibility-weight", type=float, default=0.20,
+                        help="Weight for sequence flexibility/disorder proxy.")
+    parser.add_argument("--polar-weight", type=float, default=0.10,
+                        help="Weight for polar/charged residue fraction.")
+    parser.add_argument("--gp-weight", type=float, default=0.25,
+                        help="Weight for Gly/Pro fraction.")
+    parser.add_argument("--hydrophobe-penalty", type=float, default=0.15,
+                        help="Penalty for hydrophobic content.")
+    parser.add_argument("--complexity-weight", type=float, default=0.30,
+                        help="Weight for coarse class entropy.")
+    parser.add_argument("--transition-weight", type=float, default=0.20,
+                        help="Weight for local chemistry transitions.")
+    parser.add_argument("--repeat-penalty", type=float, default=0.40,
+                        help="Penalty for long same-residue runs.")
+    parser.add_argument("--acidic-run-penalty", type=float, default=0.60,
+                        help="Penalty for extended acidic runs.")
+    parser.add_argument("--basic-run-penalty", type=float, default=0.55,
+                        help="Penalty for extended basic runs.")
+    parser.add_argument("--charged-run-penalty", type=float, default=0.90,
+                        help="Penalty for long generic charged runs.")
+    parser.add_argument("--acidic-excess-penalty", type=float, default=0.80,
+                        help="Penalty for very high acidic fraction.")
+
+
+def bonus_kwargs_from_args(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        "surface_weight": args.surface_weight,
+        "flexibility_weight": args.flexibility_weight,
+        "polar_weight": args.polar_weight,
+        "gp_weight": args.gp_weight,
+        "hydrophobe_penalty": args.hydrophobe_penalty,
+        "complexity_weight": args.complexity_weight,
+        "transition_weight": args.transition_weight,
+        "repeat_penalty": args.repeat_penalty,
+        "acidic_run_penalty": args.acidic_run_penalty,
+        "basic_run_penalty": args.basic_run_penalty,
+        "charged_run_penalty": args.charged_run_penalty,
+        "acidic_excess_penalty": args.acidic_excess_penalty,
+    }
+
+
 def add_threshold_arg(parser: argparse.ArgumentParser, *, required: bool) -> None:
     parser.add_argument(
         "--score-threshold",

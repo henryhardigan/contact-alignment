@@ -116,7 +116,7 @@ def scan_one_chunk(job):
         **scan_kwargs,
     )
     temp_path = Path(temp_dir) / f"{chunk_path.stem}.hits.tsv"
-    include_alignment = scan_kwargs["alignment_mode"] != "rigid"
+    include_alignment = scan_kwargs.get("alignment_mode", "rigid") != "rigid"
     with temp_path.open("w") as fh:
         for hit in hits:
             fh.write(_format_hit_row(hit, include_alignment))
@@ -145,7 +145,7 @@ def main():
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    include_alignment = args.alignment_mode != "rigid"
+    include_alignment = scan_kwargs.get("alignment_mode", "rigid") != "rigid"
     total_windows = 0
     total_prefilter_passed = 0
     total_scored_windows = 0
@@ -212,7 +212,7 @@ def main():
             fh.write(f"# chunks_scanned\t{len(chunk_paths)}\n")
             fh.write(f"# windows_scanned\t{total_windows}\n")
             fh.write(f"# prefilter_passed_windows\t{total_prefilter_passed}\n")
-            fh.write(f"# rescored_windows\t{total_scored_windows}\n")
+            fh.write(f"# scored_windows\t{total_scored_windows}\n")
             fh.write(f"# threshold_passed_windows\t{total_threshold_passed}\n")
             fh.write(f"# hits\t{total_hits}\n")
             if include_alignment:
